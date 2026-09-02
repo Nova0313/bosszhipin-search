@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BOSS 岗位检索控制台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #6e778a;
+      --line: #dfe3eb;
+      --panel: #ffffff;
+      --canvas: #f5f6f8;
+      --accent: #6f4bf2;
+      --accent-dark: #5839c9;
+      --accent-soft: #eeeaff;
+      --success: #18845b;
+      --danger: #c13b45;
+      --shadow: 0 18px 50px rgba(34, 40, 64, .09);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--canvas);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    body::before {
+      content: "";
+      display: block;
+      height: 6px;
+      background: var(--accent);
+    }
+    .shell { width: min(1040px, calc(100% - 40px)); margin: 54px auto 72px; }
+    .topline {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 25px;
+    }
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .16em;
+    }
+    h1 { margin: 0; font-size: clamp(30px, 5vw, 48px); line-height: 1.06; letter-spacing: -.04em; }
+    .subtitle { margin: 12px 0 0; color: var(--muted); font-size: 15px; }
+    .pure-badge {
+      flex: none;
+      border: 1px solid #d9d0ff;
+      background: var(--accent-soft);
+      color: var(--accent-dark);
+      padding: 9px 13px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 750;
+    }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(320px, .92fr); gap: 22px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid rgba(222, 225, 235, .9);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      padding: 28px;
+    }
+    .card h2 { margin: 0 0 22px; font-size: 18px; letter-spacing: -.01em; }
+    .field { margin-top: 20px; }
+    .field:first-of-type { margin-top: 0; }
+    label, .label { display: block; margin-bottom: 9px; font-size: 13px; font-weight: 750; }
+    .mode-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .mode-option { position: relative; }
+    .mode-option input { position: absolute; opacity: 0; pointer-events: none; }
+    .mode-option span {
+      display: block;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 15px 16px;
+      cursor: pointer;
+      transition: border-color .18s, background .18s, box-shadow .18s;
+    }
+    .mode-option strong { display: block; font-size: 14px; }
+    .mode-option small { display: block; margin-top: 4px; color: var(--muted); }
+    .mode-option input:checked + span {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      box-shadow: inset 0 0 0 1px var(--accent);
+    }
+    input[type="text"], input[type="number"], select {
+      width: 100%;
+      height: 46px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 13px;
+      font: inherit;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .18s, box-shadow .18s;
+    }
+    input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(111,75,242,.12); }
+    .hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .path-tools { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+    .text-button {
+      border: 0;
+      background: transparent;
+      color: var(--accent-dark);
+      padding: 0;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .info-button {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      margin-top: 10px;
+      border: 1px solid #d9d0ff;
+      border-radius: 10px;
+      background: var(--accent-soft);
+      color: var(--accent-dark);
+      padding: 7px 11px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    .info-button::after { content: "＋"; margin-left: 7px; font-weight: 850; }
+    .info-button[aria-expanded="true"]::after { content: "−"; }
+    .info-panel {
+      margin-top: 9px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fafbfc;
+      color: var(--muted);
+      padding: 12px 14px;
+      font-size: 12px;
+      line-height: 1.65;
+    }
+    .info-panel[hidden] { display: none; }
+    .info-panel p { margin: 0; }
+    .info-panel p + p { margin-top: 7px; }
+    .info-panel ul { margin: 0; padding-left: 19px; }
+    .info-panel li + li { margin-top: 6px; }
+    details { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px; }
+    summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 700; }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .check-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    .check-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 39px;
+      margin: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fafbfc;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .check-option input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+    .check-option:has(input:checked) { border-color: #cfc3ff; background: var(--accent-soft); }
+    .check-option:has(input:disabled) { cursor: not-allowed; opacity: .55; }
+    .actions { display: flex; gap: 10px; margin-top: 24px; }
+    button.primary, button.secondary {
+      height: 48px;
+      border-radius: 13px;
+      padding: 0 20px;
+      font: inherit;
+      font-weight: 780;
+      cursor: pointer;
+      transition: transform .15s, background .15s, opacity .15s;
+    }
+    button.primary { flex: 1; border: 0; color: #fff; background: var(--accent); }
+    button.primary:hover { background: var(--accent-dark); transform: translateY(-1px); }
+    button.secondary { border: 1px solid var(--line); color: var(--ink); background: #fff; }
+    button:disabled { cursor: not-allowed; opacity: .5; transform: none !important; }
+    .status-card { min-height: 490px; display: flex; flex-direction: column; }
+    .status-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .state-pill {
+      border-radius: 999px;
+      background: #eef0f4;
+      color: var(--muted);
+      padding: 7px 11px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .state-pill.running { background: var(--accent-soft); color: var(--accent-dark); }
+    .state-pill.completed { background: #e4f7ef; color: var(--success); }
+    .state-pill.failed, .state-pill.cancelled { background: #fdecee; color: var(--danger); }
+    .progress-copy { display: flex; align-items: baseline; justify-content: space-between; margin-top: 28px; }
+    .phase { font-size: 14px; font-weight: 750; }
+    .percent { color: var(--accent); font-size: 27px; font-weight: 850; letter-spacing: -.04em; }
+    .track { height: 11px; border-radius: 999px; background: #eceef3; overflow: hidden; margin-top: 11px; }
+    .bar { width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .35s ease; }
+    .result-box {
+      display: none;
+      margin-top: 18px;
+      padding: 13px 14px;
+      border: 1px solid #bfe7d6;
+      border-radius: 12px;
+      background: #effaf6;
+      color: #126b4b;
+      font-size: 12px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+    .error-box { border-color: #f2c8cc; background: #fff3f4; color: var(--danger); }
+    .log-label { margin: 22px 0 9px; color: var(--muted); font-size: 12px; font-weight: 750; }
+    .log {
+      flex: 1;
+      min-height: 220px;
+      max-height: 295px;
+      overflow: auto;
+      margin: 0;
+      border-radius: 14px;
+      background: #151825;
+      color: #d8dceb;
+      padding: 15px;
+      font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .empty-log { color: #858ca3; }
+    .footnote { margin: 17px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    @media (max-width: 820px) {
+      .shell { width: min(100% - 24px, 680px); margin-top: 34px; }
+      .topline { align-items: flex-start; flex-direction: column; }
+      .grid { grid-template-columns: 1fr; }
+      .card { padding: 22px; border-radius: 18px; }
+    }
+    @media (max-width: 480px) {
+      .mode-picker, .two-col, .check-grid { grid-template-columns: 1fr; }
+      .actions { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topline">
+      <div>
+        <p class="eyebrow">LOCAL JOB RESEARCH</p>
+        <h1>BOSS 岗位检索控制台</h1>
+        <p class="subtitle">开始前请先启动并登录项目的 BOSS 专用 Chrome，并在运行过程中保持 Chrome 后台运行。</p>
+      </div>
+      <div class="pure-badge">纯 Python · 无大模型</div>
+    </header>
+
+    <section class="grid">
+      <form id="search-form" class="card" autocomplete="off">
+        <h2>创建检索任务</h2>
+
+        <div class="field">
+          <div class="label">检索模式</div>
+          <div class="mode-picker">
+            <label class="mode-option">
+              <input type="radio" name="mode" value="keyword" checked>
+              <span><strong>按关键词</strong><small>搜索关键词 + 核心约束</small></span>
+            </label>
+            <label class="mode-option">
+              <input type="radio" name="mode" value="company">
+              <span><strong>按公司</strong><small>公司名称 + 核心约束</small></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="table-path">检索规则表格路径</label>
+          <input id="table-path" type="text" required
+            placeholder="/绝对路径/keyword_rules.csv">
+          <button class="info-button" type="button" aria-expanded="false"
+            aria-controls="rule-requirements" data-disclosure-target="rule-requirements">检索规则要求</button>
+          <div id="rule-requirements" class="info-panel" hidden>
+            <p>搜索组合默认最多 64 个，避免规则笛卡尔积突然膨胀。</p>
+            <p><strong>计算方式：</strong>关键词数 × 城市数 × 薪资数 × 工作经验数。</p>
+            <p><strong>示例：</strong>3 个关键词 × 2 个城市 × 2 个薪资标签 × 2 个经验标签 = 24 个搜索组合。某个约束列为空时，该列按 1 种“不限”计算。</p>
+          </div>
+          <div class="path-tools">
+            <button class="text-button" type="button" data-example="examples/keyword_rules.csv">使用关键词示例</button>
+            <button class="text-button" type="button" data-example="examples/company_rules.csv">使用公司示例</button>
+          </div>
+        </div>
+
+        <details>
+          <summary>高级选项</summary>
+          <div class="field">
+            <label for="output-path">输出根目录（可选）</label>
+            <input id="output-path" type="text" placeholder="留空则保存到项目 result/">
+            <p class="hint">每次任务会在该路径下新建独立文件夹，内含 jobs.csv、jobs.json 和 metadata.json</p>
+          </div>
+          <div class="field two-col">
+            <div>
+              <label for="pages">每个组合页数</label>
+              <input id="pages" type="number" min="1" placeholder="默认：全部">
+              <p class="hint">留空时会抓取该组合的全部页，直到 BOSS 返回“没有下一页”；填写正整数时表示每个组合最多抓取的页数</p>
+            </div>
+            <div>
+              <label for="interval">抓取时间间隔（秒）</label>
+              <input id="interval" type="number" min="0" max="600" step="0.5" value="8">
+            </div>
+          </div>
+          <div class="field">
+            <label class="check-option" for="fetch-jd">
+              <input id="fetch-jd" type="checkbox" checked>
+              抓取岗位 JD 详情
+            </label>
+            <p class="hint">关闭后只抓职位列表，速度更快；JD 字段将不输出</p>
+          </div>
+          <div class="field" id="max-details-field">
+            <label for="max-details">JD 详情数量上限</label>
+            <input id="max-details" type="number" min="1" placeholder="默认抓取全部命中岗位">
+            <p class="hint">只限制抓取 JD 的岗位数；最终 CSV/JSON 仍保留全部命中岗位，其余岗位的 JD 为空</p>
+          </div>
+          <div class="field" id="company-match-field" hidden>
+            <label for="company-match">公司名校验</label>
+            <select id="company-match">
+              <option value="contains">简称/全称包含匹配（推荐）</option>
+              <option value="exact">严格匹配</option>
+            </select>
+            <p class="hint">仅公司检索模式生效；用于过滤搜索结果中的同名或无关公司</p>
+          </div>
+          <div class="field">
+            <div class="label">输出字段</div>
+            <div class="check-grid" id="output-fields">
+              <label class="check-option"><input type="checkbox" value="job_id" checked>Job ID</label>
+              <label class="check-option"><input type="checkbox" value="title" checked>职位名称</label>
+              <label class="check-option"><input type="checkbox" value="company" checked>公司</label>
+              <label class="check-option"><input type="checkbox" value="location" checked>地点</label>
+              <label class="check-option"><input type="checkbox" value="salary" checked>薪资</label>
+              <label class="check-option"><input type="checkbox" value="experience" checked>工作经验</label>
+              <label class="check-option"><input type="checkbox" value="jd" data-jd-field checked>JD 内容</label>
+              <label class="check-option"><input type="checkbox" value="job_link">职位链接</label>
+              <label class="check-option"><input type="checkbox" value="boss_active_status">招聘者活跃状态</label>
+              <label class="check-option"><input type="checkbox" value="company_scale">公司规模</label>
+              <label class="check-option"><input type="checkbox" value="company_stage">融资阶段</label>
+              <label class="check-option"><input type="checkbox" value="company_industry">公司行业</label>
+              <label class="check-option"><input type="checkbox" value="skills">技能标签</label>
+              <label class="check-option"><input type="checkbox" value="welfare">福利</label>
+            </div>
+          </div>
+        </details>
+
+        <div class="actions">
+          <button id="start-button" class="primary" type="submit">开始检索</button>
+          <button id="cancel-button" class="secondary" type="button" disabled>停止</button>
+        </div>
+        <button class="info-button" type="button" aria-expanded="false"
+          aria-controls="safety-rules" data-disclosure-target="safety-rules">安全保护条例</button>
+        <div id="safety-rules" class="info-panel" hidden>
+          <ul>
+            <li>搜索组合默认最多 64 个，避免规则笛卡尔积突然膨胀</li>
+            <li>“抓取所有页”会在无更多数据、空页或没有新增岗位时自动停止，防止死循环</li>
+            <li>默认请求间隔 8 秒，列表翻页、组合切换和 JD 详情请求都会等待</li>
+            <li>同一时间只允许运行一个 Web 检索任务，避免多个任务并发冲击网站</li>
+            <li>检测到未登录、验证码、访问频繁或环境异常时会停止，不会持续重试</li>
+            <li>网络请求、Chrome 启动和登录等待都有超时及有限重试</li>
+            <li>全局请求设置 500 次安全上限保护。“全局请求安全上限”指：一次完整检索任务中，程序最多允许向 BOSS 获取页面/API 数据的次数。该数量由以下请求共同消耗：每个搜索组合的职位列表翻页、不同检索规则组合的搜索、岗位 JD 详情抓取。如果累计达到上限，程序会停止后续抓取，并保留已经抓到的数据。计算方式：48 个搜索组合 × 平均 5 页 = 240 次列表请求；再抓取 100 个岗位 JD ≈ 100 次请求；合计约 340 次</li>
+          </ul>
+        </div>
+      </form>
+
+      <section class="card status-card" aria-live="polite">
+        <div class="status-head">
+          <h2>任务进度</h2>
+          <span id="state-pill" class="state-pill">未开始</span>
+        </div>
+        <div class="progress-copy">
+          <span id="phase" class="phase">等待创建任务</span>
+          <span id="percent" class="percent">0%</span>
+        </div>
+        <div class="track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="progress-bar" class="bar"></div>
+        </div>
+        <p class="footnote">检索耗时主要取决于检索规则数量和岗位数量。</p>
+        <div id="result-box" class="result-box"></div>
+        <div class="log-label">实时日志</div>
+        <pre id="log" class="log"><span class="empty-log">任务日志会显示在这里…</span></pre>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const form = document.querySelector('#search-form');
+    const tablePath = document.querySelector('#table-path');
+    const outputPath = document.querySelector('#output-path');
+    const pages = document.querySelector('#pages');
+    const interval = document.querySelector('#interval');
+    const fetchJd = document.querySelector('#fetch-jd');
+    const maxDetails = document.querySelector('#max-details');
+    const maxDetailsField = document.querySelector('#max-details-field');
+    const outputFieldInputs = [...document.querySelectorAll('#output-fields input[type="checkbox"]')];
+    const jdOutputField = document.querySelector('[data-jd-field]');
+    const companyMatch = document.querySelector('#company-match');
+    const companyMatchField = document.querySelector('#company-match-field');
+    const startButton = document.querySelector('#start-button');
+    const cancelButton = document.querySelector('#cancel-button');
+    const statePill = document.querySelector('#state-pill');
+    const phase = document.querySelector('#phase');
+    const percent = document.querySelector('#percent');
+    const progressBar = document.querySelector('#progress-bar');
+    const progressTrack = document.querySelector('.track');
+    const resultBox = document.querySelector('#result-box');
+    const log = document.querySelector('#log');
+
+    let activeJobId = '';
+    let logOffset = 0;
+    let pollTimer = null;
+
+    const stateNames = {
+      queued: '排队中', running: '运行中', cancelling: '停止中',
+      cancelled: '已停止', completed: '已完成', failed: '失败'
+    };
+
+    function selectedMode() {
+      return document.querySelector('input[name="mode"]:checked').value;
+    }
+
+    function setProgress(value) {
+      const safe = Math.max(0, Math.min(100, Number(value) || 0));
+      progressBar.style.width = `${safe}%`;
+      percent.textContent = `${safe}%`;
+      progressTrack.setAttribute('aria-valuenow', String(safe));
+    }
+
+    function setRunning(running) {
+      startButton.disabled = running;
+      cancelButton.disabled = !running;
+      form.querySelectorAll('input, select').forEach(element => {
+        element.disabled = running;
+      });
+      if (!running) syncJdControls();
+    }
+
+    function syncJdControls() {
+      const enabled = fetchJd.checked;
+      maxDetails.disabled = !enabled;
+      maxDetailsField.style.opacity = enabled ? '1' : '.55';
+      jdOutputField.disabled = !enabled;
+      if (!enabled) jdOutputField.checked = false;
+    }
+
+    function selectedOutputFields() {
+      return outputFieldInputs.filter(input => input.checked).map(input => input.value);
+    }
+
+    function showMessage(message, isError = false) {
+      resultBox.style.display = 'block';
+      resultBox.classList.toggle('error-box', isError);
+      resultBox.textContent = message;
+    }
+
+    function appendLogs(lines) {
+      if (!lines || !lines.length) return;
+      if (log.querySelector('.empty-log')) log.textContent = '';
+      log.textContent += `${lines.join('\n')}\n`;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function renderStatus(data) {
+      statePill.textContent = stateNames[data.state] || data.state;
+      statePill.className = `state-pill ${data.state}`;
+      phase.textContent = data.phase || '处理中';
+      setProgress(data.progress);
+      appendLogs(data.logs);
+      logOffset = data.next_offset || logOffset;
+
+      const terminal = ['completed', 'failed', 'cancelled'].includes(data.state);
+      if (terminal) {
+        clearTimeout(pollTimer);
+        setRunning(false);
+        if (data.state === 'completed') {
+          showMessage(`检索完成。结果目录：${data.output_path}\nCSV：${data.csv_path}\nJSON：${data.json_path}`);
+        } else {
+          showMessage(data.error || data.phase || '任务未完成', true);
+        }
+      }
+      return terminal;
+    }
+
+    async function pollStatus() {
+      if (!activeJobId) return;
+      try {
+        const response = await fetch(`/api/status?job_id=${encodeURIComponent(activeJobId)}&offset=${logOffset}`, {
+          cache: 'no-store'
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '无法获取任务状态');
+        if (!renderStatus(data)) pollTimer = setTimeout(pollStatus, 850);
+      } catch (error) {
+        showMessage(error.message, true);
+        setRunning(false);
+      }
+    }
+
+    document.querySelectorAll('input[name="mode"]').forEach(input => {
+      input.addEventListener('change', () => {
+        const isCompany = selectedMode() === 'company';
+        companyMatchField.hidden = !isCompany;
+        tablePath.placeholder = isCompany
+          ? '/绝对路径/company_rules.csv'
+          : '/绝对路径/keyword_rules.csv';
+      });
+    });
+
+    fetchJd.addEventListener('change', syncJdControls);
+    syncJdControls();
+
+    document.querySelectorAll('[data-example]').forEach(button => {
+      button.addEventListener('click', () => {
+        tablePath.value = button.dataset.example;
+        const company = button.dataset.example.includes('company');
+        document.querySelector(`input[name="mode"][value="${company ? 'company' : 'keyword'}"]`).click();
+      });
+    });
+
+    document.querySelectorAll('[data-disclosure-target]').forEach(button => {
+      button.addEventListener('click', () => {
+        const panel = document.getElementById(button.dataset.disclosureTarget);
+        const willOpen = button.getAttribute('aria-expanded') !== 'true';
+        button.setAttribute('aria-expanded', String(willOpen));
+        panel.hidden = !willOpen;
+      });
+    });
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      clearTimeout(pollTimer);
+      resultBox.style.display = 'none';
+      log.innerHTML = '<span class="empty-log">正在启动检索程序…</span>';
+      logOffset = 0;
+      setProgress(0);
+      setRunning(true);
+      statePill.textContent = '启动中';
+      statePill.className = 'state-pill running';
+      phase.textContent = '校验检索规则';
+
+      const payload = {
+        mode: selectedMode(),
+        table_path: tablePath.value,
+        output_path: outputPath.value,
+        pages: pages.value,
+        interval: interval.value,
+        fetch_jd: fetchJd.checked,
+        output_fields: selectedOutputFields(),
+        max_details: maxDetails.value,
+        company_match: companyMatch.value
+      };
+      try {
+        const response = await fetch('/api/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '任务启动失败');
+        activeJobId = data.job_id;
+        renderStatus(data);
+        pollTimer = setTimeout(pollStatus, 300);
+      } catch (error) {
+        statePill.textContent = '启动失败';
+        statePill.className = 'state-pill failed';
+        phase.textContent = '无法创建任务';
+        showMessage(error.message, true);
+        setRunning(false);
+      }
+    });
+
+    cancelButton.addEventListener('click', async () => {
+      if (!activeJobId) return;
+      cancelButton.disabled = true;
+      try {
+        const response = await fetch('/api/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: activeJobId })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '停止任务失败');
+        renderStatus(data);
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    });
+  </script>
+</body>
+</html>

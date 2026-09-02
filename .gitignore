@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+result/
+.DS_Store
+boss_jobs_*.json
+boss_jobs_*.csv
+boss_details_*.json
+boss_details_*.csv
