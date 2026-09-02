@@ -92,7 +92,7 @@
       background: var(--accent-soft);
       box-shadow: inset 0 0 0 1px var(--accent);
     }
-    input[type="text"], input[type="number"], select {
+    input[type="text"], input[type="number"], input[type="date"], select {
       width: 100%;
       height: 46px;
       border: 1px solid var(--line);
@@ -311,6 +311,20 @@
             </div>
           </div>
           <div class="field">
+            <div class="label">岗位发布时间区间（可选）</div>
+            <div class="two-col">
+              <div>
+                <label for="published-from">起始日期</label>
+                <input id="published-from" type="date">
+              </div>
+              <div>
+                <label for="published-to">结束日期</label>
+                <input id="published-to" type="date">
+              </div>
+            </div>
+            <p class="hint">起止日期均包含当天。启用后会读取岗位详情页中的发布时间/更新时间；无法识别时间的岗位会被排除，并计入任务日志。</p>
+          </div>
+          <div class="field">
             <label class="check-option" for="fetch-jd">
               <input id="fetch-jd" type="checkbox" checked>
               抓取岗位 JD 详情
@@ -339,6 +353,7 @@
               <label class="check-option"><input type="checkbox" value="location" checked>地点</label>
               <label class="check-option"><input type="checkbox" value="salary" checked>薪资</label>
               <label class="check-option"><input type="checkbox" value="experience" checked>工作经验</label>
+              <label class="check-option"><input type="checkbox" value="publish_date" checked>发布时间</label>
               <label class="check-option"><input type="checkbox" value="jd" data-jd-field checked>JD 内容</label>
               <label class="check-option"><input type="checkbox" value="job_link">职位链接</label>
               <label class="check-option"><input type="checkbox" value="boss_active_status">招聘者活跃状态</label>
@@ -362,10 +377,11 @@
             <li>搜索组合默认最多 64 个，避免规则笛卡尔积突然膨胀</li>
             <li>“抓取所有页”会在无更多数据、空页或没有新增岗位时自动停止，防止死循环</li>
             <li>默认请求间隔 8 秒，列表翻页、组合切换和 JD 详情请求都会等待</li>
+            <li>启用发布时间区间后，需要逐个读取岗位详情页，会增加请求次数；没有可靠时间信息的岗位不会猜测日期</li>
             <li>同一时间只允许运行一个 Web 检索任务，避免多个任务并发冲击网站</li>
             <li>检测到未登录、验证码、访问频繁或环境异常时会停止，不会持续重试</li>
             <li>网络请求、Chrome 启动和登录等待都有超时及有限重试</li>
-            <li>全局请求设置 500 次安全上限保护。“全局请求安全上限”指：一次完整检索任务中，程序最多允许向 BOSS 获取页面/API 数据的次数。该数量由以下请求共同消耗：每个搜索组合的职位列表翻页、不同检索规则组合的搜索、岗位 JD 详情抓取。如果累计达到上限，程序会停止后续抓取，并保留已经抓到的数据。计算方式：48 个搜索组合 × 平均 5 页 = 240 次列表请求；再抓取 100 个岗位 JD ≈ 100 次请求；合计约 340 次</li>
+            <li>全局请求设置 2000 次安全上限保护。职位列表翻页、发布时间读取和岗位 JD 详情抓取会共同消耗该配额。达到上限时会停止后续抓取并保留检查点，下次使用相同规则和检索条件时自动继续</li>
           </ul>
         </div>
       </form>
@@ -396,6 +412,8 @@
     const outputPath = document.querySelector('#output-path');
     const pages = document.querySelector('#pages');
     const interval = document.querySelector('#interval');
+    const publishedFrom = document.querySelector('#published-from');
+    const publishedTo = document.querySelector('#published-to');
     const fetchJd = document.querySelector('#fetch-jd');
     const maxDetails = document.querySelector('#max-details');
     const maxDetailsField = document.querySelector('#max-details-field');
@@ -551,6 +569,8 @@
         output_path: outputPath.value,
         pages: pages.value,
         interval: interval.value,
+        published_from: publishedFrom.value,
+        published_to: publishedTo.value,
         fetch_jd: fetchJd.checked,
         output_fields: selectedOutputFields(),
         max_details: maxDetails.value,

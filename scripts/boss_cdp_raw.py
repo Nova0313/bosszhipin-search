@@ -35,13 +35,14 @@ import hashlib
 import csv
 import glob
 import platform
+import calendar
 import subprocess
 import shutil
 import signal
 import logging
 import ntpath
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from collections import Counter
 from enum import Enum
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
@@ -64,7 +65,7 @@ HOT_CITY_URL = "https://www.zhipin.com/wapi/zpgeek/search/job/hot/city.json"
 CITY_GROUP_URL = "https://www.zhipin.com/wapi/zpCommon/data/cityGroup.json"
 
 # 请求频率保护
-MAX_API_REQUESTS = 500  # 单次最大 API 请求数
+MAX_API_REQUESTS = 2000  # 单次最大页面/API 请求数
 
 class ChromeExecutableNotFoundError(RuntimeError):
     """No Chromium-compatible browser executable could be found."""
@@ -312,6 +313,10 @@ EXPERIENCE_MAP = {
     "不限": "0", "在校生": "108", "应届生": "102", "经验不限": "101",
     "1年以内": "103", "1-3年": "104",
     "3-5年": "105", "5-10年": "106", "10年以上": "107",
+}
+
+JOB_TYPE_MAP = {
+    "不限": "0", "全职": "1901", "兼职": "1903",
 }
 
 DEGREE_MAP = {
@@ -637,6 +642,14 @@ def map_api_job(raw):
 
     encrypt_job_id = str(raw.get("encryptJobId") or "")
     encrypt_brand_id = str(raw.get("encryptBrandId") or "")
+    publish_time = str(
+        raw.get("publishTime")
+        or raw.get("publishedTime")
+        or raw.get("datePosted")
+        or raw.get("updateTime")
+        or raw.get("releaseTime")
+        or ""
+    ).strip()
     return {
         "title": raw.get("jobName") or "",
         "salary": raw.get("salaryDesc") or "",
@@ -673,6 +686,8 @@ def map_api_job(raw):
             if encrypt_brand_id else ""
         ),
         "welfare": " | ".join(raw.get("welfareList") or []),
+        "publish_time": publish_time,
+        "publish_date": normalize_publish_date(publish_time),
     }
 
 
@@ -733,6 +748,19 @@ DETAIL_DESCRIPTION_MARKER = "职位描述"
 DETAIL_COMPETITIVENESS_MARKER = "竞争力分析"
 DETAIL_SAFETY_MARKER = "BOSS 安全提示"
 MIN_DETAIL_TEXT_LENGTH = 120
+PUBLISH_TIME_MAX_ATTEMPTS = 3
+PUBLISH_TIME_MAX_CONSECUTIVE_FAILURES = 3
+PUBLISH_TIME_PATTERN = re.compile(
+    r"(?:发布于|发布时间|更新时间|更新于|posted|published|updated)\s*[:：]?\s*"
+    r"([^|\n，,。]{1,40})",
+    re.IGNORECASE,
+)
+PUBLISH_DATE_PATTERN = re.compile(
+    r"(?:今天|昨天|前天)(?:\s+\d{1,2}:\d{2})?|刚刚|"
+    r"\d+\s*(?:分钟|小时|天|周|个月|年)前|"
+    r"\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:[日号]?)?(?:\s+\d{1,2}:\d{2})?|"
+    r"\d{1,2}月\d{1,2}日(?:\s+\d{1,2}:\d{2})?"
+)
 
 
 class DetailExtractionError(ValueError):
@@ -775,14 +803,152 @@ EXTRACT_DETAIL_JS = """
             jd = text;
         }
     }
+    function cleanTimestamp(value) {
+        if (!value) return '';
+        var text = String(value).replace(/\s+/g, ' ').trim();
+        var labeled = text.match(/(?:发布于|发布时间|更新时间|更新于|posted|published|updated)\s*[:：]?\s*([^|\n，,。]{1,40})/i);
+        var source = labeled ? labeled[1] : text;
+        var date = source.match(/((?:今天|昨天|前天)(?:\s+\d{1,2}:\d{2})?|刚刚|\d+\s*(?:分钟|小时|天|周|个月|年)前|\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:[日号]?)?(?:\s+\d{1,2}:\d{2})?|\d{1,2}月\d{1,2}日(?:\s+\d{1,2}:\d{2})?)/);
+        return date ? date[1].trim() : '';
+    }
+    function findTimestamp(root) {
+        var candidates = [];
+        root.querySelectorAll('[data-publish-time], [data-update-time], meta[itemprop="datePosted"], meta[property="article:published_time"]').forEach(function(node) {
+            candidates.push(node.getAttribute('content') || node.getAttribute('data-publish-time') || node.getAttribute('data-update-time') || node.textContent);
+        });
+        root.querySelectorAll('time, [class*="publish"], [class*="update"], [class*="date"], [class*="time"]').forEach(function(node) {
+            var text = node.textContent || '';
+            if (/(?:发布于|发布时间|更新时间|更新于|posted|published|updated)/i.test(text)) candidates.push(text);
+        });
+        root.querySelectorAll('script').forEach(function(node) {
+            var source = node.textContent || '';
+            var match = source.match(/(?:publishTime|publishedTime|datePosted|updateTime|releaseTime)"?\s*:\s*"([^"\n]+)"/i);
+            if (match) candidates.push(match[1]);
+        });
+        var bodyText = root.body ? root.body.textContent : root.textContent;
+        var bodyMatch = (bodyText || '').match(/(?:发布于|发布时间|更新时间|更新于|posted|published|updated)\s*[:：]?\s*([^|\n，,。]{1,40})/i);
+        if (bodyMatch) candidates.push(bodyMatch[0]);
+        for (var i = 0; i < candidates.length; i++) {
+            var value = cleanTimestamp(candidates[i]);
+            if (value) return value;
+        }
+        return '';
+    }
     return JSON.stringify({
         jd: jd,
         page_text: pageText.substring(0, 12000),
         tags: tags,
+        publish_time: findTimestamp(document),
         url: location.href
     });
 })()
 """
+
+
+EXTRACT_PUBLISH_TIME_JS = r"""
+(function(){
+    function cleanTimestamp(value) {
+        if (!value) return '';
+        var text = String(value).replace(/\s+/g, ' ').trim();
+        var labeled = text.match(/(?:发布于|发布时间|更新时间|更新于|posted|published|updated)\s*[:：]?\s*([^|\n，,。]{1,40})/i);
+        var source = labeled ? labeled[1] : text;
+        var date = source.match(/((?:今天|昨天|前天)(?:\s+\d{1,2}:\d{2})?|刚刚|\d+\s*(?:分钟|小时|天|周|个月|年)前|\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:[日号]?)?(?:\s+\d{1,2}:\d{2})?|\d{1,2}月\d{1,2}日(?:\s+\d{1,2}:\d{2})?)/);
+        return date ? date[1].trim() : '';
+    }
+    var candidates = [];
+    document.querySelectorAll('[data-publish-time], [data-update-time], meta[itemprop="datePosted"], meta[property="article:published_time"]').forEach(function(node) {
+        candidates.push(node.getAttribute('content') || node.getAttribute('data-publish-time') || node.getAttribute('data-update-time') || node.textContent);
+    });
+    document.querySelectorAll('time, [class*="publish"], [class*="update"], [class*="date"], [class*="time"]').forEach(function(node) {
+        var text = node.textContent || '';
+        if (/(?:发布于|发布时间|更新时间|更新于|posted|published|updated)/i.test(text)) candidates.push(text);
+    });
+    document.querySelectorAll('script').forEach(function(node) {
+        var source = node.textContent || '';
+        var match = source.match(/(?:publishTime|publishedTime|datePosted|updateTime|releaseTime)"?\s*:\s*"([^"\n]+)"/i);
+        if (match) candidates.push(match[1]);
+    });
+    var bodyText = document.body ? document.body.textContent : document.textContent;
+    var bodyMatch = (bodyText || '').match(/(?:发布于|发布时间|更新时间|更新于|posted|published|updated)\s*[:：]?\s*([^|\n，,。]{1,40})/i);
+    if (bodyMatch) candidates.push(bodyMatch[0]);
+    var publishTime = '';
+    for (var i = 0; i < candidates.length; i++) {
+        publishTime = cleanTimestamp(candidates[i]);
+        if (publishTime) break;
+    }
+    return JSON.stringify({
+        publish_time: publishTime,
+        page_text: (document.body ? document.body.innerText : '').substring(0, 3000),
+        url: location.href
+    });
+})()
+"""
+
+
+def _subtract_calendar_months(value: date, months: int) -> date:
+    month_index = value.year * 12 + value.month - 1 - months
+    year, month_zero = divmod(month_index, 12)
+    month = month_zero + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def normalize_publish_date(value, reference_time: datetime | None = None) -> str:
+    """Normalize the timestamp formats used by BOSS pages to YYYY-MM-DD."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    labeled = PUBLISH_TIME_PATTERN.search(text)
+    source = labeled.group(1).strip() if labeled else text
+    match = PUBLISH_DATE_PATTERN.search(source)
+    if not match:
+        return ""
+    token = match.group(0).strip()
+    now = reference_time or datetime.now()
+
+    if token == "刚刚" or token.startswith("今天"):
+        return now.date().isoformat()
+    if token.startswith("昨天"):
+        return (now.date() - timedelta(days=1)).isoformat()
+    if token.startswith("前天"):
+        return (now.date() - timedelta(days=2)).isoformat()
+
+    relative = re.match(r"(\d+)\s*(分钟|小时|天|周|个月|年)前", token)
+    if relative:
+        amount = int(relative.group(1))
+        unit = relative.group(2)
+        if unit == "分钟":
+            return (now - timedelta(minutes=amount)).date().isoformat()
+        if unit == "小时":
+            return (now - timedelta(hours=amount)).date().isoformat()
+        if unit == "天":
+            return (now.date() - timedelta(days=amount)).isoformat()
+        if unit == "周":
+            return (now.date() - timedelta(weeks=amount)).isoformat()
+        if unit == "个月":
+            return _subtract_calendar_months(now.date(), amount).isoformat()
+        try:
+            return now.date().replace(year=now.year - amount).isoformat()
+        except ValueError:
+            return now.date().replace(year=now.year - amount, day=28).isoformat()
+
+    full_date = re.match(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})", token)
+    if full_date:
+        try:
+            return date(*(int(part) for part in full_date.groups())).isoformat()
+        except ValueError:
+            return ""
+
+    month_day = re.match(r"(\d{1,2})月(\d{1,2})日", token)
+    if month_day:
+        try:
+            candidate = date(now.year, int(month_day.group(1)), int(month_day.group(2)))
+        except ValueError:
+            return ""
+        if candidate > now.date():
+            candidate = candidate.replace(year=candidate.year - 1)
+        return candidate.isoformat()
+    return ""
 
 
 def _normalize_detail_whitespace(text):
@@ -922,7 +1088,13 @@ def extract_detail_fields(extracted, min_length=MIN_DETAIL_TEXT_LENGTH):
         raise DetailExtractionError(
             f"job description too short after validation: {len(jd)} < {min_length}"
         )
-    return {"jd": jd, "boss_active_status": boss_active_status}
+    publish_time = str(extracted.get("publish_time") or "").strip()
+    return {
+        "jd": jd,
+        "boss_active_status": boss_active_status,
+        "publish_time": publish_time,
+        "publish_date": normalize_publish_date(publish_time),
+    }
 
 
 def extract_job_description(extracted, min_length=MIN_DETAIL_TEXT_LENGTH):
@@ -1577,6 +1749,10 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
         for k, v in EXPERIENCE_MAP.items():
             if v == filters["experience"]:
                 filter_desc.append(f"经验={k}")
+    if filters.get("jobType"):
+        for k, v in JOB_TYPE_MAP.items():
+            if v == filters["jobType"]:
+                filter_desc.append(f"求职类型={k}")
     if filters.get("degree"):
         for k, v in DEGREE_MAP.items():
             if v == filters["degree"]:
@@ -1812,6 +1988,9 @@ def build_detail_record(job, extracted):
             if "经验" in tag or "年" in tag or tag in {"应届生", "在校生"}:
                 experience = tag
                 break
+    publish_time = str(
+        extracted.get("publish_time") or job.get("publish_time") or ""
+    ).strip()
     return {
         "job_id": job.get("job_id", ""),
         "title": job.get("title", ""),
@@ -1825,8 +2004,166 @@ def build_detail_record(job, extracted):
         "job_link": link,
         "link": link,
         "skill_tags": extracted.get("tags", []),
+        "publish_time": publish_time,
+        "publish_date": (
+            extracted.get("publish_date")
+            or job.get("publish_date")
+            or normalize_publish_date(publish_time)
+        ),
         "jd": extracted.get("jd", ""),
     }
+
+
+def _is_retryable_cdp_transport_error(exc):
+    """Return whether a publication-time read can recover by reconnecting."""
+    error_types = (OSError, TimeoutError, CDPConnectionError)
+    if websocket is not None:
+        error_types += (websocket.WebSocketException,)
+    return isinstance(exc, error_types)
+
+
+def _read_publish_time_once(job, cdp_port):
+    """Read one job timestamp using an isolated, always-closed CDP session."""
+    detail_url = build_detail_url(job)
+    ws = None
+    tid = None
+    try:
+        incr_request()
+        ws = CDPSession(cdp_port)
+        tid, sid = create_page_session(ws)
+        ws.send("Page.navigate", {"url": detail_url}, sid)
+        time.sleep(random.uniform(3, 6))
+        value = ws.eval_js(EXTRACT_PUBLISH_TIME_JS, sid)
+        try:
+            extracted = json.loads(value) if isinstance(value, str) else {}
+        except (json.JSONDecodeError, ValueError, TypeError):
+            extracted = {}
+        page_text = str(extracted.get("page_text") or "")
+        if DETAIL_LOGIN_MARKER in page_text:
+            raise RuntimeError(
+                "BOSS detail login expired; stopped while reading publication dates"
+            )
+        return str(extracted.get("publish_time") or "").strip()
+    finally:
+        if ws is not None and tid is not None:
+            try:
+                ws.send("Target.closeTarget", {"targetId": tid})
+            except Exception:
+                pass
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+
+def scrape_publish_times(
+    jobs,
+    cdp_port=DEFAULT_CDP_PORT,
+    request_interval=None,
+    start_index=0,
+    checkpoint_callback=None,
+):
+    """Enrich jobs with publication dates by inspecting their detail pages.
+
+    The fallback mirrors ``boss_show_time``: keep a timestamp already present
+    in list data, otherwise inspect explicit publish/update fields and labelled
+    text on the detail page. Missing timestamps remain blank and are not guessed.
+    """
+    jobs = [dict(job) for job in jobs]
+    start_index = max(0, min(int(start_index or 0), len(jobs)))
+    consecutive_transport_failures = 0
+    print(f"\n=== 读取岗位发布时间 ({len(jobs)} 个) ===\n")
+    if start_index:
+        print(f"发现断点，从第 {start_index + 1}/{len(jobs)} 个岗位继续\n")
+
+    def save_checkpoint(completed, force=False):
+        if checkpoint_callback and (
+            force or completed % 10 == 0 or completed == len(jobs)
+        ):
+            checkpoint_callback(jobs, completed)
+
+    for index in range(start_index + 1, len(jobs) + 1):
+        job = jobs[index - 1]
+        title = job.get("title", "")
+        company = job.get("boss_name") or job.get("company") or ""
+        print(f"[发布时间 {index}/{len(jobs)}] {company} - {title}")
+
+        publish_time = str(job.get("publish_time") or "").strip()
+        publish_date = str(job.get("publish_date") or "").strip()
+        if publish_time and not publish_date:
+            publish_date = normalize_publish_date(publish_time)
+        if publish_date:
+            job["publish_date"] = publish_date
+            print(f"  发布时间: {publish_time or publish_date} ({publish_date})")
+            save_checkpoint(index)
+            continue
+
+        detail_url = build_detail_url(job)
+        if not detail_url:
+            print("  未提供详情链接，发布时间未知")
+            save_checkpoint(index)
+            continue
+
+        publish_time = ""
+        last_transport_error = None
+        for attempt in range(1, PUBLISH_TIME_MAX_ATTEMPTS + 1):
+            try:
+                publish_time = _read_publish_time_once(job, cdp_port)
+                last_transport_error = None
+                consecutive_transport_failures = 0
+                break
+            except Exception as exc:
+                if not _is_retryable_cdp_transport_error(exc):
+                    save_checkpoint(index - 1, force=True)
+                    raise
+                last_transport_error = exc
+                if attempt < PUBLISH_TIME_MAX_ATTEMPTS:
+                    retry_delay = min(
+                        max(float(request_interval or 0), 1.0),
+                        5.0,
+                    )
+                    print(
+                        f"  CDP 连接中断，{retry_delay:.1f}s 后重连"
+                        f" ({attempt}/{PUBLISH_TIME_MAX_ATTEMPTS - 1})..."
+                    )
+                    time.sleep(retry_delay)
+
+        if last_transport_error is not None:
+            consecutive_transport_failures += 1
+            job["publish_time"] = ""
+            job["publish_date"] = ""
+            print(
+                "  CDP 重连仍失败，该岗位发布时间记为未知: "
+                f"{last_transport_error}"
+            )
+            if consecutive_transport_failures >= PUBLISH_TIME_MAX_CONSECUTIVE_FAILURES:
+                save_checkpoint(index - 1, force=True)
+                raise CDPConnectionError(
+                    f"连续 {consecutive_transport_failures} 个岗位在重连后仍无法读取，"
+                    "Chrome CDP 可能已关闭或崩溃，已停止任务"
+                ) from last_transport_error
+        else:
+            publish_date = normalize_publish_date(publish_time)
+            job["publish_time"] = publish_time
+            job["publish_date"] = publish_date
+            if publish_date:
+                print(f"  发布时间: {publish_time} ({publish_date})")
+            else:
+                print("  页面未提供可识别的发布时间")
+
+        save_checkpoint(index)
+
+        if index < len(jobs):
+            gap = (
+                float(request_interval)
+                if request_interval is not None
+                else random.uniform(10, 25)
+            )
+            if gap > 0:
+                print(f"  等待 {gap:.1f}s 后读取下一个...\n")
+                time.sleep(gap)
+    return jobs
 
 
 def scrape_details(list_data, max_details=None, output_path=None,
@@ -1907,6 +2244,8 @@ def scrape_details(list_data, max_details=None, output_path=None,
                 list_status=job.get("boss_active_status", ""),
                 detail_status=fields["boss_active_status"],
             )
+            d["publish_time"] = fields["publish_time"]
+            d["publish_date"] = fields["publish_date"]
         except DetailLoginRequiredError as exc:
             ws.send("Target.closeTarget", {"targetId": tid})
             ws.close()
@@ -2610,6 +2949,7 @@ def main():
   --stage 807          融资阶段 (801=未融资 ... 807=已上市 808=不需要融资)
   --salary 406         薪资范围 (402=3K以下 403=3-5K 404=5-10K 405=10-20K 406=20-50K 407=50K+)
   --experience 105     经验要求 (108=在校生 102=应届生 101=经验不限 103=1年以内 104=1-3年 105=3-5年 106=5-10年 107=10年+)
+  --job-type 1901      求职类型 (1901=全职 1903=兼职)
   --degree 203         学历要求 (209=初中及以下 208=中专/中技 206=高中 202=大专 203=本科 204=硕士 205=博士)
   --industry 1001      行业 (1001=互联网 1002=电商 1003=金融 ...)
 
@@ -2661,6 +3001,7 @@ def main():
     p.add_argument("--stage", default=None, help="融资阶段代码")
     p.add_argument("--salary", default=None, help="薪资范围代码")
     p.add_argument("--experience", default=None, help="经验要求代码")
+    p.add_argument("--job-type", dest="job_type", default=None, help="求职类型代码")
     p.add_argument("--degree", default=None, help="学历要求代码")
     p.add_argument("--industry", default=None, help="行业代码")
 
@@ -2748,6 +3089,8 @@ def main():
         val = getattr(args, key)
         if val:
             filters[key] = val
+    if args.job_type:
+        filters["jobType"] = args.job_type
 
     # 加载或抓取列表
     if args.input:

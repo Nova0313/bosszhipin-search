@@ -1,4 +1,4 @@
-# BOSS 直聘岗位检索工具
+# BOSS 直聘岗位检索工具 v1.4.1
 
 纯 Python 实现，不使用大语言模型。支持按关键词或公司名检索岗位，输出 CSV 和 JSON。
 
@@ -39,7 +39,7 @@ http://127.0.0.1:8765/
 
 1. 选择“按关键词”或“按公司”。
 2. 填写规则 CSV/XLSX 的本机路径。
-3. 按需调整页数、请求间隔、JD 和输出字段。
+3. 按需设置岗位发布时间区间，并调整页数、请求间隔、JD 和输出字段。
 4. 点击“开始检索”，页面会显示进度和日志。
 
 不想自动打开浏览器时：
@@ -98,24 +98,34 @@ python -m scripts.batch_search examples/keyword_rules.csv --dry-run
 - `--interval 8`：请求间隔秒数。
 - `--no-detail`：不抓取 JD。
 - `--max-details 100`：最多抓取 100 个 JD。
-- `--output-fields job_id,title,company,location,salary,experience,jd`：指定输出字段。
+- `--published-from 2026-08-01`：仅保留该日期及之后发布/更新的岗位。
+- `--published-to 2026-08-31`：仅保留该日期及之前发布/更新的岗位。
+- `--output-fields job_id,title,company,location,salary,experience,publish_date,jd`：指定输出字段。
+
+发布时间区间的起止日期均包含当天。启用后，程序会参考
+`boss_show_time` 的识别方式，优先使用列表已有时间，否则逐个读取详情页中的
+`datePosted`、`publishTime`、发布时间或更新时间文本。无法识别可靠时间的岗位会被
+排除并计入日志；该步骤会增加详情页请求次数。候选岗位列表和发布时间进度会保存到
+输出根目录的 `.checkpoints` 中；任务中断后，使用相同规则表和检索条件重新运行即可
+自动继续。完整成功后会删除检查点。单次任务的全局页面/API 请求上限为 2000 次。
 
 ## 检索规则
 
 关键词模式表头：
 
 ```text
-搜索关键词,城市,薪资待遇,工作经验
+搜索关键词,城市,薪资待遇,工作经验,求职类型
 ```
 
 公司模式表头：
 
 ```text
-公司名称,城市,薪资待遇,工作经验
+公司名称,城市,薪资待遇,工作经验,求职类型
 ```
 
 - 同一列中的值是 OR。
-- 关键词/公司、城市、薪资、经验各列之间是 AND。
+- 关键词/公司、城市、薪资、经验、求职类型各列之间是 AND。
+- 求职类型列可选，支持“不限”、“全职”和“兼职”；省略该列时默认不限。
 - 各列长度可以不同，行之间没有对应关系。
 - 默认最多生成 64 个搜索组合。
 
@@ -129,7 +139,8 @@ python -m scripts.batch_search examples/keyword_rules.csv --dry-run
 - `jobs.json`
 - `metadata.json`
 
-默认输出字段为 `job_id`、`title`、`company`、`location`、`salary`、`experience` 和 `jd`。
+默认输出字段为 `job_id`、`title`、`company`、`location`、`salary`、`experience`、
+`publish_date` 和 `jd`。
 
 ## 常见问题
 

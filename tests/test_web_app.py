@@ -22,6 +22,8 @@ class RequestValidationTests(unittest.TestCase):
         self.assertIsNone(options["max_details"])
         self.assertEqual(options["interval"], 8)
         self.assertTrue(options["fetch_jd"])
+        self.assertEqual(options["published_from"], "")
+        self.assertEqual(options["published_to"], "")
         self.assertIn("salary", options["output_fields"])
         self.assertIn("experience", options["output_fields"])
 
@@ -101,6 +103,35 @@ class RequestValidationTests(unittest.TestCase):
                     "pages": "0",
                 })
 
+    def test_publish_date_range_is_validated_and_forwarded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "rules.csv"
+            table.write_text("搜索关键词,城市,薪资待遇,工作经验\nPython,上海,,\n", encoding="utf-8")
+            options = module.normalize_start_request({
+                "table_path": str(table),
+                "published_from": "2026-08-01",
+                "published_to": "2026-08-31",
+            })
+
+        command = module.build_command({**options, "result_dir": pathlib.Path("/tmp/result")})
+        self.assertEqual(options["published_from"], "2026-08-01")
+        self.assertEqual(options["published_to"], "2026-08-31")
+        self.assertIn("--published-from", command)
+        self.assertIn("2026-08-01", command)
+        self.assertIn("--published-to", command)
+        self.assertIn("2026-08-31", command)
+
+    def test_publish_date_range_rejects_reversed_dates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "rules.csv"
+            table.write_text("搜索关键词,城市,薪资待遇,工作经验\nPython,上海,,\n", encoding="utf-8")
+            with self.assertRaisesRegex(module.WebRequestError, "不能晚于"):
+                module.normalize_start_request({
+                    "table_path": str(table),
+                    "published_from": "2026-09-01",
+                    "published_to": "2026-08-31",
+                })
+
 
 class HtmlContentTests(unittest.TestCase):
     @classmethod
@@ -112,10 +143,17 @@ class HtmlContentTests(unittest.TestCase):
         self.assertIn("计算方式：", self.html)
         self.assertIn("安全保护条例", self.html)
         self.assertIn("搜索组合默认最多 64 个", self.html)
+        self.assertIn("全局请求设置 2000 次", self.html)
+        self.assertNotIn("全局请求设置 500 次", self.html)
 
     def test_removed_path_hint_and_ten_page_input_cap(self):
         self.assertNotIn("浏览器无法读取文件的真实路径", self.html)
         self.assertNotIn('id="pages" type="number" min="1" max="10"', self.html)
+
+    def test_publish_date_controls_and_output_field_are_present(self):
+        self.assertIn('id="published-from" type="date"', self.html)
+        self.assertIn('id="published-to" type="date"', self.html)
+        self.assertIn('value="publish_date" checked', self.html)
 
 
 class ProgressTests(unittest.TestCase):
@@ -133,6 +171,17 @@ class ProgressTests(unittest.TestCase):
         module.update_progress_from_line(self.task, "[5/10] 示例公司 - Python工程师")
         self.assertEqual(self.task.phase, "抓取岗位详情 5/10")
         self.assertEqual(self.task.progress, 75)
+
+    def test_publish_time_progress_is_reported_before_detail_progress(self):
+        module.update_progress_from_line(self.task, "=== 读取岗位发布时间 (10 个) ===")
+        module.update_progress_from_line(self.task, "[发布时间 5/10] 示例公司 - Python工程师")
+        self.assertEqual(self.task.phase, "读取岗位发布时间 5/10")
+        self.assertEqual(self.task.progress, 60)
+
+        module.update_progress_from_line(self.task, "=== 抓取岗位详情 (4 个) ===")
+        module.update_progress_from_line(self.task, "[2/4] 示例公司 - Python工程师")
+        self.assertEqual(self.task.phase, "抓取岗位详情 2/4")
+        self.assertGreaterEqual(self.task.progress, 82)
 
     def test_csv_line_reaches_finishing_phase(self):
         module.update_progress_from_line(self.task, "结果 CSV 已保存: /tmp/jobs.csv")

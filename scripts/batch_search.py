@@ -5,7 +5,7 @@ Boolean semantics are deliberately explicit:
 
 * tags inside one cell are OR alternatives;
 * all non-empty values in the same column are OR alternatives;
-* search-term/city/salary/experience columns are AND constraints;
+* search-term/city/salary/experience/job-type columns are AND constraints;
 * rows have no positional relationship and may have different lengths;
 * results are merged by job_id (with a stable fallback key).
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import itertools
 import json
 import os
@@ -26,7 +27,7 @@ import tempfile
 import time
 import zipfile
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Iterable
 from xml.etree import ElementTree as ET
@@ -49,6 +50,7 @@ HEADER_ALIASES = {
     "city": {"城市", "工作城市", "工作地点", "city", "location"},
     "salary": {"薪资待遇", "薪资", "薪资范围", "salary"},
     "experience": {"工作经验", "经验", "经验要求", "experience"},
+    "job_type": {"求职类型", "工作性质", "职位性质", "jobtype", "job_type"},
 }
 
 TAG_SPLIT_RE = re.compile(r"[\r\n,，;；|、]+")
@@ -81,6 +83,11 @@ EXPERIENCE_ALIASES = {
     "10年以上": ["107"],
     "10年+": ["107"],
 }
+JOB_TYPE_ALIASES = {
+    "不限": [""],
+    "无限制": [""],
+    "任意": [""],
+}
 
 
 class TableRuleError(ValueError):
@@ -94,8 +101,10 @@ class SearchRule:
     cities: tuple[str, ...]
     salary_codes: tuple[str, ...]
     experience_codes: tuple[str, ...]
+    job_type_codes: tuple[str, ...]
     salary_labels: tuple[str, ...]
     experience_labels: tuple[str, ...]
+    job_type_labels: tuple[str, ...]
 
     @property
     def combination_count(self) -> int:
@@ -104,6 +113,7 @@ class SearchRule:
             * len(self.cities)
             * len(self.salary_codes)
             * len(self.experience_codes)
+            * len(self.job_type_codes)
         )
 
 
@@ -114,11 +124,18 @@ class SearchCombination:
     city_code: str
     salary_code: str
     experience_code: str
+    job_type_code: str = ""
     mode: str = MODE_KEYWORD
 
     @property
-    def key(self) -> tuple[str, str, str, str]:
-        return (self.search_term, self.city_code, self.salary_code, self.experience_code)
+    def key(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.search_term,
+            self.city_code,
+            self.salary_code,
+            self.experience_code,
+            self.job_type_code,
+        )
 
     def filters(self) -> dict[str, str]:
         result = {}
@@ -126,6 +143,8 @@ class SearchCombination:
             result["salary"] = self.salary_code
         if self.experience_code:
             result["experience"] = self.experience_code
+        if self.job_type_code:
+            result["jobType"] = self.job_type_code
         return result
 
     def to_dict(self) -> dict:
@@ -137,6 +156,8 @@ class SearchCombination:
             "salary_code": self.salary_code or "0",
             "experience": display_filter_code(self.experience_code, boss.EXPERIENCE_MAP),
             "experience_code": self.experience_code or "0",
+            "job_type": display_filter_code(self.job_type_code, boss.JOB_TYPE_MAP),
+            "job_type_code": self.job_type_code or "0",
         }
         result[self.mode] = self.search_term
         return result
@@ -377,6 +398,9 @@ def parse_rules(rows: list[list[str]], mode: str = MODE_KEYWORD) -> list[SearchR
     cities = collect_column_tags("city")
     salary_labels = collect_column_tags("salary") or ["不限"]
     experience_labels = collect_column_tags("experience") or ["不限"]
+    job_type_labels = (
+        collect_column_tags("job_type") if "job_type" in columns else []
+    ) or ["不限"]
     if not search_terms:
         label = "搜索关键词" if mode == MODE_KEYWORD else "公司名称"
         raise TableRuleError(f"{label}列没有任何有效值")
@@ -393,8 +417,12 @@ def parse_rules(rows: list[list[str]], mode: str = MODE_KEYWORD) -> list[SearchR
         experience_codes=resolve_filter_labels(
             experience_labels, boss.EXPERIENCE_MAP, EXPERIENCE_ALIASES, "工作经验"
         ),
+        job_type_codes=resolve_filter_labels(
+            job_type_labels, boss.JOB_TYPE_MAP, JOB_TYPE_ALIASES, "求职类型"
+        ),
         salary_labels=tuple(salary_labels),
         experience_labels=tuple(experience_labels),
+        job_type_labels=tuple(job_type_labels),
     )]
 
 
@@ -422,8 +450,12 @@ def expand_rules(
                 "请减少单元格标签，或显式调大 --max-combinations。"
             )
         resolved_cities = [city_resolver(city) for city in rule.cities]
-        for search_term, (city_name, city_code), salary, experience in itertools.product(
-            rule.search_terms, resolved_cities, rule.salary_codes, rule.experience_codes
+        for search_term, (city_name, city_code), salary, experience, job_type in itertools.product(
+            rule.search_terms,
+            resolved_cities,
+            rule.salary_codes,
+            rule.experience_codes,
+            rule.job_type_codes,
         ):
             candidate = SearchCombination(
                 search_term=search_term,
@@ -431,6 +463,7 @@ def expand_rules(
                 city_code=city_code,
                 salary_code=salary,
                 experience_code=experience,
+                job_type_code=job_type,
                 mode=rule.mode,
             )
             existing = combinations.get(candidate.key)
@@ -501,17 +534,30 @@ def execute_plan(
     delay: float,
     company_match: str = "contains",
     scrape_func: Callable | None = None,
+    start_index: int = 0,
+    initial_jobs: Iterable[dict] | None = None,
+    initial_runs: Iterable[dict] | None = None,
+    progress_callback: Callable | None = None,
 ) -> tuple[list[dict], list[dict]]:
     scrape_func = scrape_func or boss.scrape_list
-    jobs_by_key: dict[str, dict] = {}
-    runs = []
+    start_index = max(0, min(int(start_index or 0), len(combinations)))
+    jobs_by_key: dict[str, dict] = {
+        _job_key(job): dict(job)
+        for job in (initial_jobs or [])
+        if isinstance(job, dict)
+    }
+    runs = [dict(run) for run in (initial_runs or []) if isinstance(run, dict)]
+    if start_index:
+        print(f"发现列表检索断点，从组合 {start_index + 1}/{len(combinations)} 继续")
     with tempfile.TemporaryDirectory(prefix="boss_batch_") as temp_dir:
-        for index, combination in enumerate(combinations, 1):
+        for index in range(start_index + 1, len(combinations) + 1):
+            combination = combinations[index - 1]
             condition = combination.to_dict()
             print(
                 f"\n=== 组合 {index}/{len(combinations)}: "
                 f"{combination.search_term} AND {condition['city']} AND "
-                f"{condition['salary']} AND {condition['experience']} ==="
+                f"{condition['salary']} AND {condition['experience']} AND "
+                f"{condition['job_type']} ==="
             )
             intermediate = os.path.join(temp_dir, f"run_{index:04d}.json")
             data = scrape_func(
@@ -551,6 +597,8 @@ def execute_plan(
                     jobs_by_key[key] = job
                 elif condition not in existing.setdefault("matched_conditions", []):
                     existing["matched_conditions"].append(condition)
+            if progress_callback:
+                progress_callback(list(jobs_by_key.values()), runs, index)
             if index < len(combinations) and delay > 0:
                 wait_seconds = delay
                 print(f"组合间等待 {wait_seconds:.1f}s，降低请求密度...")
@@ -587,6 +635,7 @@ OUTPUT_FIELD_LABELS = {
     "location": "地点",
     "salary": "薪资",
     "experience": "工作经验",
+    "publish_date": "发布时间",
     "jd": "JD 内容",
     "job_link": "职位链接",
     "boss_active_status": "招聘者活跃状态",
@@ -597,9 +646,94 @@ OUTPUT_FIELD_LABELS = {
     "welfare": "福利",
 }
 FINAL_CSV_COLUMNS = [
-    "job_id", "title", "company", "location", "salary", "experience", "jd",
+    "job_id", "title", "company", "location", "salary", "experience",
+    "publish_date", "jd",
 ]
 DEFAULT_RESULT_ROOT = Path(__file__).resolve().parents[1] / "result"
+CHECKPOINT_SCHEMA_VERSION = 1
+
+
+def search_checkpoint_fingerprint(
+    table_path: str,
+    combinations: list[SearchCombination],
+    pages: int | None,
+    company_match: str,
+    allow_dom_fallback: bool,
+) -> str:
+    """Build a stable key for list-search inputs that affect candidate jobs."""
+    table = Path(table_path).expanduser().resolve()
+    payload = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "table_sha256": hashlib.sha256(table.read_bytes()).hexdigest(),
+        "combinations": [combination.to_dict() for combination in combinations],
+        "pages": pages,
+        "company_match": company_match,
+        "allow_dom_fallback": bool(allow_dom_fallback),
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def search_checkpoint_path(
+    table_path: str,
+    fingerprint: str,
+    output_root: str | None,
+    exact_result_dir: str | None,
+) -> Path:
+    """Place resumable state in a shared root across Web task directories."""
+    if exact_result_dir:
+        root = Path(exact_result_dir).expanduser().resolve().parent
+    elif output_root:
+        root = Path(output_root).expanduser().resolve()
+    else:
+        root = DEFAULT_RESULT_ROOT
+    stem = re.sub(
+        r"[^0-9A-Za-z_\-\u4e00-\u9fff]+",
+        "_",
+        Path(table_path).stem,
+    ).strip("_") or "rules"
+    return root / ".checkpoints" / f"{stem}_{fingerprint[:20]}.json"
+
+
+def load_search_checkpoint(path: Path, fingerprint: str) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        print(f"⚠️ 检查点文件损坏，将重新检索: {path}")
+        return None
+    if (
+        not isinstance(checkpoint, dict)
+        or checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION
+        or checkpoint.get("fingerprint") != fingerprint
+        or not isinstance(checkpoint.get("jobs"), list)
+        or not isinstance(checkpoint.get("runs"), list)
+    ):
+        print(f"⚠️ 检查点与当前检索不匹配，将重新检索: {path}")
+        return None
+    return checkpoint
+
+
+def save_search_checkpoint(
+    path: Path,
+    fingerprint: str,
+    jobs: Iterable[dict],
+    runs: Iterable[dict],
+    combination_next_index: int,
+    publish_next_index: int,
+) -> None:
+    boss._atomic_write_json(str(path), {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "fingerprint": fingerprint,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "combination_next_index": int(combination_next_index),
+        "publish_next_index": int(publish_next_index),
+        "jobs": list(jobs),
+        "runs": list(runs),
+    })
 
 
 def parse_output_fields(raw_fields: str | None) -> list[str]:
@@ -688,6 +822,60 @@ def export_record_from_job(job: dict) -> dict:
     return record
 
 
+def parse_publish_date_range(
+    published_from: str | None,
+    published_to: str | None,
+) -> tuple[date | None, date | None]:
+    """Parse an inclusive YYYY-MM-DD publication-date range."""
+    boundaries = []
+    for raw_value, label in (
+        (published_from, "发布时间起始日期"),
+        (published_to, "发布时间结束日期"),
+    ):
+        value = str(raw_value or "").strip()
+        if not value:
+            boundaries.append(None)
+            continue
+        try:
+            boundaries.append(date.fromisoformat(value))
+        except ValueError as exc:
+            raise ValueError(f"{label}必须是 YYYY-MM-DD 格式") from exc
+    start, end = boundaries
+    if start and end and start > end:
+        raise ValueError("发布时间起始日期不能晚于结束日期")
+    return start, end
+
+
+def filter_jobs_by_publish_date(
+    jobs: Iterable[dict],
+    published_from: date | None,
+    published_to: date | None,
+) -> tuple[list[dict], dict[str, int]]:
+    """Keep jobs inside an inclusive date range; unknown dates are excluded."""
+    matched = []
+    stats = {"input": 0, "matched": 0, "unknown": 0, "outside": 0}
+    for job in jobs:
+        stats["input"] += 1
+        raw_date = str(job.get("publish_date") or "").strip()
+        if not raw_date:
+            stats["unknown"] += 1
+            continue
+        try:
+            publish_date = date.fromisoformat(raw_date)
+        except ValueError:
+            stats["unknown"] += 1
+            continue
+        if published_from and publish_date < published_from:
+            stats["outside"] += 1
+            continue
+        if published_to and publish_date > published_to:
+            stats["outside"] += 1
+            continue
+        matched.append(job)
+    stats["matched"] = len(matched)
+    return matched, stats
+
+
 def attach_match_metadata(details: list[dict], jobs: list[dict]) -> list[dict]:
     """Merge fetched details into every list job, preserving jobs without JD."""
     details_by_key = {_job_key(detail): detail for detail in details}
@@ -731,6 +919,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="不抓取 JD，直接输出职位列表")
     parser.add_argument("--output-fields", default=None,
                         help=f"逗号分隔的输出字段（默认 {','.join(FINAL_CSV_COLUMNS)}）")
+    parser.add_argument("--published-from", default=None, metavar="YYYY-MM-DD",
+                        help="岗位发布时间起始日期（包含当天）")
+    parser.add_argument("--published-to", default=None, metavar="YYYY-MM-DD",
+                        help="岗位发布时间结束日期（包含当天）")
     parser.add_argument("--company-match", choices=["contains", "exact"], default="contains",
                         help="公司模式的公司名校验策略（默认 contains）")
     parser.add_argument("--analysis", action="store_true", help="输出固定规则聚合分析")
@@ -750,6 +942,9 @@ def main(argv=None) -> int:
         return 2
     try:
         output_fields = parse_output_fields(args.output_fields)
+        published_from, published_to = parse_publish_date_range(
+            args.published_from, args.published_to,
+        )
         rules, combinations = build_plan(
             args.table,
             mode=args.mode,
@@ -779,7 +974,8 @@ def main(argv=None) -> int:
     print(
         f"已汇总列值: {MODE_LABELS[rule.mode]} {len(rule.search_terms)} 个，"
         f"城市 {len(rule.cities)} 个，薪资 {len(rule.salary_codes)} 个，"
-        f"经验 {len(rule.experience_codes)} 个；"
+        f"经验 {len(rule.experience_codes)} 个，"
+        f"求职类型 {len(rule.job_type_codes)} 个；"
         f"展开为 {len(combinations)} 个唯一搜索组合\n"
         "逻辑: 同列所有值 OR，列之间 AND，行之间没有对应关系"
     )
@@ -791,17 +987,122 @@ def main(argv=None) -> int:
         return 1
 
     try:
-        jobs, runs = execute_plan(
+        checkpoint_fingerprint = search_checkpoint_fingerprint(
+            args.table,
             combinations,
-            pages=args.pages,
-            cdp_port=args.cdp_port,
-            allow_dom_fallback=args.allow_dom_fallback,
-            delay=args.interval,
-            company_match=args.company_match,
+            args.pages,
+            args.company_match,
+            args.allow_dom_fallback,
         )
-    except (boss.LoginGateError, boss.CDPConnectionError) as exc:
-        print(str(exc))
+        checkpoint_path = search_checkpoint_path(
+            args.table,
+            checkpoint_fingerprint,
+            args.output_dir,
+            args.result_dir,
+        )
+    except OSError as exc:
+        print(f"❌ 无法创建检索检查点: {exc}")
         return 1
+
+    checkpoint = load_search_checkpoint(checkpoint_path, checkpoint_fingerprint)
+    if checkpoint:
+        jobs = [dict(job) for job in checkpoint["jobs"] if isinstance(job, dict)]
+        runs = [dict(run) for run in checkpoint["runs"] if isinstance(run, dict)]
+        combination_next_index = max(
+            0,
+            min(int(checkpoint.get("combination_next_index") or 0), len(combinations)),
+        )
+        publish_next_index = max(
+            0,
+            min(int(checkpoint.get("publish_next_index") or 0), len(jobs)),
+        )
+        print(
+            f"已加载检查点: 候选岗位 {len(jobs)} 条，"
+            f"列表组合 {combination_next_index}/{len(combinations)}，"
+            f"发布时间 {publish_next_index}/{len(jobs)}"
+        )
+    else:
+        jobs = []
+        runs = []
+        combination_next_index = 0
+        publish_next_index = 0
+
+    def save_list_progress(current_jobs, current_runs, next_index):
+        save_search_checkpoint(
+            checkpoint_path,
+            checkpoint_fingerprint,
+            current_jobs,
+            current_runs,
+            combination_next_index=next_index,
+            publish_next_index=0,
+        )
+
+    if combination_next_index < len(combinations):
+        try:
+            jobs, runs = execute_plan(
+                combinations,
+                pages=args.pages,
+                cdp_port=args.cdp_port,
+                allow_dom_fallback=args.allow_dom_fallback,
+                delay=args.interval,
+                company_match=args.company_match,
+                start_index=combination_next_index,
+                initial_jobs=jobs,
+                initial_runs=runs,
+                progress_callback=save_list_progress,
+            )
+        except (RuntimeError, boss.LoginGateError, boss.CDPConnectionError, OSError) as exc:
+            print(f"❌ 列表检索中止，已完成组合的检查点已保留: {exc}")
+            return 1
+        combination_next_index = len(combinations)
+        publish_next_index = 0
+        save_search_checkpoint(
+            checkpoint_path,
+            checkpoint_fingerprint,
+            jobs,
+            runs,
+            combination_next_index=combination_next_index,
+            publish_next_index=publish_next_index,
+        )
+        print(f"候选岗位检查点已保存: {checkpoint_path}")
+    else:
+        print("列表检索已在检查点中完成，跳过重复检索")
+
+    publish_filter_stats = None
+    if published_from or published_to:
+        def save_publish_progress(current_jobs, next_index):
+            save_search_checkpoint(
+                checkpoint_path,
+                checkpoint_fingerprint,
+                current_jobs,
+                runs,
+                combination_next_index=len(combinations),
+                publish_next_index=next_index,
+            )
+
+        try:
+            jobs = boss.scrape_publish_times(
+                jobs,
+                cdp_port=args.cdp_port,
+                request_interval=args.interval,
+                start_index=publish_next_index,
+                checkpoint_callback=save_publish_progress,
+            )
+        except (RuntimeError, boss.CDPConnectionError, OSError) as exc:
+            print(f"❌ 发布时间读取中止，检查点已保留: {exc}")
+            return 1
+        jobs, publish_filter_stats = filter_jobs_by_publish_date(
+            jobs, published_from, published_to,
+        )
+        range_text = (
+            f"{published_from.isoformat() if published_from else '不限'} 至 "
+            f"{published_to.isoformat() if published_to else '不限'}"
+        )
+        print(
+            f"发布时间筛选 {range_text}: 保留 {publish_filter_stats['matched']} 条，"
+            f"区间外 {publish_filter_stats['outside']} 条，"
+            f"时间未知并排除 {publish_filter_stats['unknown']} 条"
+        )
 
     payload.update({
         "scraped_at": datetime.now().isoformat(),
@@ -814,8 +1115,11 @@ def main(argv=None) -> int:
             "fetch_jd": args.fetch_jd,
             "max_details": args.max_details,
             "company_match": args.company_match,
+            "published_from": args.published_from,
+            "published_to": args.published_to,
             "output_fields": output_fields,
         },
+        "publish_filter_stats": publish_filter_stats,
     })
     try:
         result_dir = create_result_directory(
@@ -859,6 +1163,14 @@ def main(argv=None) -> int:
     print(f"最终输出 {len(records)} 条岗位记录")
     if args.analysis:
         boss.analyze(list_data, records, search_keyword="")
+    try:
+        checkpoint_path.unlink(missing_ok=True)
+        try:
+            checkpoint_path.parent.rmdir()
+        except OSError:
+            pass
+    except OSError as exc:
+        print(f"⚠️ 最终结果已保存，但无法删除已完成的检查点: {exc}")
     return 0
 
 

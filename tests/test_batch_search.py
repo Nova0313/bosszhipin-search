@@ -6,6 +6,7 @@ import pathlib
 import tempfile
 import unittest
 import zipfile
+from datetime import date
 from unittest import mock
 
 from scripts import batch_search as module
@@ -109,6 +110,21 @@ class TagParsingTests(unittest.TestCase):
         rule = module.parse_rules(rows)[0]
         self.assertEqual(rule.salary_codes, ("",))
         self.assertEqual(rule.experience_codes, ("",))
+        self.assertEqual(rule.job_type_codes, ("",))
+
+    def test_full_time_job_type_is_forwarded_as_boss_filter(self):
+        rows = [
+            ["搜索关键词", "城市", "薪资待遇", "工作经验", "求职类型"],
+            ["Python", "全国", "不限", "不限", "全职"],
+        ]
+        rule = module.parse_rules(rows)[0]
+        combinations = module.expand_rules(
+            [rule], city_resolver=fake_city_resolver
+        )
+
+        self.assertEqual(rule.job_type_codes, ("1901",))
+        self.assertEqual(combinations[0].filters()["jobType"], "1901")
+        self.assertEqual(combinations[0].to_dict()["job_type"], "全职")
 
     def test_unknown_filter_label_fails_before_browser_use(self):
         rows = [
@@ -201,6 +217,28 @@ class ExecutionTests(unittest.TestCase):
         args = module.build_arg_parser().parse_args(["rules.csv"])
         self.assertIsNone(args.pages)
 
+    def test_publish_date_range_is_inclusive_and_excludes_unknown_dates(self):
+        jobs = [
+            {"job_id": "before", "publish_date": "2026-07-31"},
+            {"job_id": "start", "publish_date": "2026-08-01"},
+            {"job_id": "end", "publish_date": "2026-08-31"},
+            {"job_id": "after", "publish_date": "2026-09-01"},
+            {"job_id": "unknown", "publish_date": ""},
+        ]
+
+        filtered, stats = module.filter_jobs_by_publish_date(
+            jobs, date(2026, 8, 1), date(2026, 8, 31),
+        )
+
+        self.assertEqual([job["job_id"] for job in filtered], ["start", "end"])
+        self.assertEqual(stats, {"input": 5, "matched": 2, "unknown": 1, "outside": 2})
+
+    def test_publish_date_range_validation_rejects_bad_order_and_format(self):
+        with self.assertRaisesRegex(ValueError, "YYYY-MM-DD"):
+            module.parse_publish_date_range("2026/08/01", "")
+        with self.assertRaisesRegex(ValueError, "不能晚于"):
+            module.parse_publish_date_range("2026-09-01", "2026-08-01")
+
     def test_dry_run_accepts_manual_pages_above_ten(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             table = pathlib.Path(temp_dir) / "rules.csv"
@@ -258,6 +296,42 @@ class ExecutionTests(unittest.TestCase):
 
         self.assertEqual(request_intervals, [2.5, 2.5])
         sleep.assert_called_once_with(2.5)
+
+    def test_execute_plan_resumes_after_completed_combination(self):
+        combinations = [
+            module.SearchCombination("Python", "上海", "101020100", "406", "105"),
+            module.SearchCombination("Go", "上海", "101020100", "406", "105"),
+        ]
+        initial_job = {
+            "job_id": "python", "title": "Python", "matched_conditions": [
+                combinations[0].to_dict()
+            ],
+        }
+        initial_run = {**combinations[0].to_dict(), "jobs_found_raw": 1, "jobs_matched": 1}
+        progress = []
+
+        def fake_scrape(keyword, *_args, **_kwargs):
+            self.assertEqual(keyword, "Go")
+            return {"jobs": [{"job_id": "go", "title": "Go"}]}
+
+        jobs, runs = module.execute_plan(
+            combinations,
+            pages=1,
+            cdp_port=9222,
+            allow_dom_fallback=False,
+            delay=0,
+            scrape_func=fake_scrape,
+            start_index=1,
+            initial_jobs=[initial_job],
+            initial_runs=[initial_run],
+            progress_callback=lambda saved_jobs, saved_runs, index: progress.append(
+                (len(saved_jobs), len(saved_runs), index)
+            ),
+        )
+
+        self.assertEqual({job["job_id"] for job in jobs}, {"python", "go"})
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(progress, [(2, 2, 2)])
 
     def test_company_mode_filters_unrelated_search_hits(self):
         combinations = [
@@ -323,7 +397,7 @@ class ExecutionTests(unittest.TestCase):
             details = [{
                 "job_id": "abc", "title": "Python工程师", "company": "示例公司",
                 "location": "上海", "salary": "20-40K", "experience": "3-5年",
-                "jd": "负责后端开发",
+                "publish_date": "2026-08-31", "jd": "负责后端开发",
             }]
             with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
                     mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
@@ -383,10 +457,157 @@ class ExecutionTests(unittest.TestCase):
                 rows_out,
             )
 
+    def test_main_filters_by_publish_date_before_export(self):
+        rows = [
+            ["搜索关键词", "城市", "薪资待遇", "工作经验"],
+            ["Python", "上海", "20-50K", "3-5年"],
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table_path = pathlib.Path(temp_dir) / "rules.csv"
+            result_dir = pathlib.Path(temp_dir) / "one-task"
+            write_csv(table_path, rows)
+            jobs = [
+                {"job_id": "keep", "title": "Python工程师", "boss_name": "公司A"},
+                {"job_id": "drop", "title": "Go工程师", "boss_name": "公司B"},
+            ]
+            enriched = [
+                {**jobs[0], "publish_date": "2026-08-15"},
+                {**jobs[1], "publish_date": "2026-07-31"},
+            ]
+            with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
+                    mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
+                    mock.patch.object(module, "execute_plan", return_value=(jobs, [])), \
+                    mock.patch.object(module.boss, "scrape_publish_times", return_value=enriched) as scrape_times, \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                code = module.main([
+                    str(table_path), "--result-dir", str(result_dir), "--no-detail",
+                    "--published-from", "2026-08-01", "--published-to", "2026-08-31",
+                    "--output-fields", "job_id,publish_date", "--interval", "0",
+                ])
+
+            self.assertEqual(code, 0)
+            scrape_times.assert_called_once_with(
+                jobs,
+                cdp_port=9222,
+                request_interval=0.0,
+                start_index=0,
+                checkpoint_callback=mock.ANY,
+            )
+            self.assertIn("保留 1 条", output.getvalue())
+            with open(result_dir / "jobs.csv", encoding="utf-8-sig", newline="") as handle:
+                rows_out = list(csv.DictReader(handle))
+            self.assertEqual(rows_out, [{"job_id": "keep", "publish_date": "2026-08-15"}])
+            metadata = json.loads((result_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                metadata["publish_filter_stats"],
+                {"input": 2, "matched": 1, "unknown": 0, "outside": 1},
+            )
+
+    def test_main_reuses_candidate_checkpoint_after_detail_failure(self):
+        rows = [
+            ["搜索关键词", "城市", "薪资待遇", "工作经验"],
+            ["Python", "上海", "20-50K", "3-5年"],
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            table_path = root / "rules.csv"
+            write_csv(table_path, rows)
+            jobs = [{
+                "job_id": "saved", "title": "Python工程师", "boss_name": "示例公司",
+            }]
+            with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
+                    mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
+                    mock.patch.object(module, "execute_plan", return_value=(jobs, [])) as execute, \
+                    mock.patch.object(module.boss, "scrape_details", side_effect=RuntimeError("CDP reset")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                first_code = module.main([
+                    str(table_path), "--result-dir", str(root / "task-1"),
+                ])
+
+            checkpoint_files = list((root / ".checkpoints").glob("*.json"))
+            self.assertEqual(first_code, 1)
+            self.assertEqual(len(checkpoint_files), 1)
+
+            with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
+                    mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
+                    mock.patch.object(module, "execute_plan") as second_execute, \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                second_code = module.main([
+                    str(table_path), "--result-dir", str(root / "task-2"), "--no-detail",
+                ])
+
+            self.assertEqual(second_code, 0)
+            second_execute.assert_not_called()
+            self.assertIn("已加载检查点", output.getvalue())
+            self.assertFalse((root / ".checkpoints").exists())
+            exported = json.loads((root / "task-2" / "jobs.json").read_text(encoding="utf-8"))
+            self.assertEqual(exported[0]["job_id"], "saved")
+
+    def test_main_resumes_publish_time_from_checkpoint_index(self):
+        rows = [
+            ["搜索关键词", "城市", "薪资待遇", "工作经验"],
+            ["Python", "上海", "20-50K", "3-5年"],
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            table_path = root / "rules.csv"
+            write_csv(table_path, rows)
+            jobs = [
+                {"job_id": "one", "title": "Python", "boss_name": "公司A"},
+                {"job_id": "two", "title": "Python", "boss_name": "公司B"},
+            ]
+
+            def interrupt_publish(current_jobs, **kwargs):
+                enriched = [
+                    {**current_jobs[0], "publish_date": "2026-08-15"},
+                    dict(current_jobs[1]),
+                ]
+                kwargs["checkpoint_callback"](enriched, 1)
+                raise RuntimeError("interrupted")
+
+            common_args = [
+                str(table_path), "--no-detail", "--published-from", "2026-08-01",
+                "--published-to", "2026-08-31", "--interval", "0",
+            ]
+            with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
+                    mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
+                    mock.patch.object(module, "execute_plan", return_value=(jobs, [])), \
+                    mock.patch.object(module.boss, "scrape_publish_times", side_effect=interrupt_publish), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                first_code = module.main([
+                    *common_args, "--result-dir", str(root / "task-1"),
+                ])
+
+            def finish_publish(current_jobs, **kwargs):
+                self.assertEqual(kwargs["start_index"], 1)
+                self.assertEqual(current_jobs[0]["publish_date"], "2026-08-15")
+                return [
+                    dict(current_jobs[0]),
+                    {**current_jobs[1], "publish_date": "2026-08-20"},
+                ]
+
+            with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
+                    mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
+                    mock.patch.object(module, "execute_plan") as second_execute, \
+                    mock.patch.object(module.boss, "scrape_publish_times", side_effect=finish_publish), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                second_code = module.main([
+                    *common_args, "--result-dir", str(root / "task-2"),
+                ])
+
+            self.assertEqual(first_code, 1)
+            self.assertEqual(second_code, 0)
+            second_execute.assert_not_called()
+            exported = json.loads((root / "task-2" / "jobs.json").read_text(encoding="utf-8"))
+            self.assertEqual([row["job_id"] for row in exported], ["one", "two"])
+
     def test_default_output_columns_include_salary_and_experience(self):
         self.assertEqual(
             module.FINAL_CSV_COLUMNS,
-            ["job_id", "title", "company", "location", "salary", "experience", "jd"],
+            [
+                "job_id", "title", "company", "location", "salary", "experience",
+                "publish_date", "jd",
+            ],
         )
 
     def test_detail_limit_keeps_unfetched_jobs_with_blank_jd(self):

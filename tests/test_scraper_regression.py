@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from contextlib import redirect_stdout
 from unittest import mock
 
@@ -359,6 +360,7 @@ class ChromeSetupTests(unittest.TestCase):
 
     def test_filter_maps_match_current_boss_condition_snapshot(self):
         module = load_module()
+        self.assertEqual(module.MAX_API_REQUESTS, 2000)
 
         self.assertEqual(
             module.SALARY_MAP,
@@ -385,6 +387,10 @@ class ChromeSetupTests(unittest.TestCase):
                 "5-10年": "106",
                 "10年以上": "107",
             },
+        )
+        self.assertEqual(
+            module.JOB_TYPE_MAP,
+            {"不限": "0", "全职": "1901", "兼职": "1903"},
         )
         self.assertEqual(
             module.DEGREE_MAP,
@@ -555,6 +561,8 @@ class ChromeSetupTests(unittest.TestCase):
             "tags": ["Python"],
             "jd": "Build AI agents",
             "boss_active_status": "今日活跃",
+            "publish_time": "昨天 09:30",
+            "publish_date": "2026-09-01",
         }
 
         detail = module.build_detail_record(job, extracted)
@@ -566,6 +574,73 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertEqual(detail["salary_source"], "api")
         self.assertEqual(detail["experience"], "3-5年")
         self.assertEqual(detail["boss_active_status"], "今日活跃")
+        self.assertEqual(detail["publish_time"], "昨天 09:30")
+        self.assertEqual(detail["publish_date"], "2026-09-01")
+
+    def test_publish_time_formats_are_normalized_to_dates(self):
+        module = load_module()
+        reference = datetime(2026, 9, 2, 12, 0)
+
+        self.assertEqual(module.normalize_publish_date("刚刚", reference), "2026-09-02")
+        self.assertEqual(module.normalize_publish_date("发布于：昨天 09:30", reference), "2026-09-01")
+        self.assertEqual(module.normalize_publish_date("3天前", reference), "2026-08-30")
+        self.assertEqual(module.normalize_publish_date("2个月前", reference), "2026-07-02")
+        self.assertEqual(module.normalize_publish_date("2026年8月31日", reference), "2026-08-31")
+        self.assertEqual(module.normalize_publish_date("12月31日", reference), "2025-12-31")
+        self.assertEqual(module.normalize_publish_date("没有公开时间", reference), "")
+
+    def test_api_job_uses_known_publish_time_fields_when_present(self):
+        module = load_module()
+
+        job = module.map_api_job({
+            "jobName": "Python工程师",
+            "publishTime": "2026-08-31 10:20",
+            "encryptJobId": "job-1",
+        })
+
+        self.assertEqual(job["publish_time"], "2026-08-31 10:20")
+        self.assertEqual(job["publish_date"], "2026-08-31")
+
+    def test_publish_time_extractor_follows_reference_fields_without_guessing(self):
+        module = load_module()
+
+        self.assertIn('meta[itemprop="datePosted"]', module.EXTRACT_PUBLISH_TIME_JS)
+        self.assertIn("publishTime", module.EXTRACT_PUBLISH_TIME_JS)
+        self.assertIn("发布时间", module.EXTRACT_PUBLISH_TIME_JS)
+        self.assertIn("return ''", module.EXTRACT_PUBLISH_TIME_JS)
+
+    def test_publish_time_read_reconnects_after_connection_reset(self):
+        module = load_module()
+        module.websocket = mock.Mock(WebSocketException=ConnectionResetError)
+        first_session = mock.Mock()
+        first_session.eval_js.side_effect = ConnectionResetError(54, "reset by peer")
+        second_session = mock.Mock()
+        second_session.eval_js.return_value = json.dumps({
+            "publish_time": "昨天 09:30",
+            "page_text": "",
+        })
+        job = {
+            "job_id": "job-1",
+            "title": "Python工程师",
+            "job_link": "https://www.zhipin.com/job_detail/job-1.html",
+        }
+
+        with mock.patch.object(
+            module, "CDPSession", side_effect=[first_session, second_session]
+        ) as session_factory, mock.patch.object(
+            module, "create_page_session", return_value=("target", "session")
+        ), mock.patch.object(module, "incr_request"), mock.patch.object(
+            module.time, "sleep"
+        ):
+            jobs = module.scrape_publish_times(
+                [job], cdp_port=9222, request_interval=0,
+            )
+
+        self.assertEqual(session_factory.call_count, 2)
+        self.assertEqual(jobs[0]["publish_time"], "昨天 09:30")
+        self.assertTrue(jobs[0]["publish_date"])
+        first_session.close.assert_called_once_with()
+        second_session.close.assert_called_once_with()
 
     def test_detail_record_falls_back_to_list_active_status(self):
         module = load_module()

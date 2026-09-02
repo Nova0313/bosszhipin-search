@@ -34,6 +34,8 @@ SUPPORTED_TABLE_SUFFIXES = {".csv", ".tsv", ".xlsx", ".xlsm"}
 LIST_PROGRESS_RE = re.compile(r"===\s*组合\s+(\d+)/(\d+):")
 DETAIL_TOTAL_RE = re.compile(r"===\s*抓取岗位详情\s*\((\d+)\s*个\)")
 DETAIL_PROGRESS_RE = re.compile(r"^\[(\d+)/(\d+)\]")
+PUBLISH_TOTAL_RE = re.compile(r"===\s*读取岗位发布时间\s*\((\d+)\s*个\)")
+PUBLISH_PROGRESS_RE = re.compile(r"^\[发布时间\s+(\d+)/(\d+)\]")
 
 
 class WebRequestError(ValueError):
@@ -59,6 +61,7 @@ class ScrapeTask:
     started_at: str = ""
     finished_at: str = ""
     detail_started: bool = False
+    publish_started: bool = False
     process: Optional[subprocess.Popen] = field(default=None, repr=False)
 
     def public_data(self, offset: int = 0) -> dict:
@@ -97,6 +100,16 @@ def _boolean_value(value, default=True) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise WebRequestError("是否抓取 JD 必须是布尔值")
+
+
+def _date_value(value, label: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+    except ValueError as exc:
+        raise WebRequestError(f"{label}必须是 YYYY-MM-DD 格式") from exc
 
 
 def normalize_start_request(payload: dict) -> dict:
@@ -164,6 +177,11 @@ def normalize_start_request(payload: dict) -> dict:
     if company_match not in {"contains", "exact"}:
         raise WebRequestError("公司名校验策略必须是 contains 或 exact")
 
+    published_from = _date_value(payload.get("published_from"), "发布时间起始日期")
+    published_to = _date_value(payload.get("published_to"), "发布时间结束日期")
+    if published_from and published_to and published_from > published_to:
+        raise WebRequestError("发布时间起始日期不能晚于结束日期")
+
     raw_fields = payload.get("output_fields")
     if raw_fields is None:
         output_fields = list(batch.FINAL_CSV_COLUMNS)
@@ -194,6 +212,8 @@ def normalize_start_request(payload: dict) -> dict:
         "output_fields": output_fields,
         "max_details": max_details,
         "company_match": company_match,
+        "published_from": published_from,
+        "published_to": published_to,
     }
 
 
@@ -216,6 +236,10 @@ def build_command(options: dict) -> list[str]:
     ]
     if options["pages"] is not None:
         command.extend(["--pages", str(options["pages"])])
+    if options.get("published_from"):
+        command.extend(["--published-from", options["published_from"]])
+    if options.get("published_to"):
+        command.extend(["--published-to", options["published_to"]])
     if options["fetch_jd"] and options["max_details"] is not None:
         command.extend(["--max-details", str(options["max_details"])])
     if not options["fetch_jd"]:
@@ -238,18 +262,34 @@ def update_progress_from_line(task: ScrapeTask, line: str) -> None:
         task.phase = "已跳过 JD，正在生成结果"
         task.progress = max(task.progress, 82)
         return
+    publish_total = PUBLISH_TOTAL_RE.search(line)
+    if publish_total:
+        task.publish_started = True
+        task.phase = f"读取岗位发布时间 0/{publish_total.group(1)}"
+        task.progress = max(task.progress, 52)
+        return
+    publish_progress = PUBLISH_PROGRESS_RE.search(line)
+    if publish_progress:
+        current, total = (int(value) for value in publish_progress.groups())
+        task.phase = f"读取岗位发布时间 {current}/{total}"
+        task.progress = max(task.progress, 52 + round(16 * current / max(total, 1)))
+        return
     detail_total = DETAIL_TOTAL_RE.search(line)
     if detail_total:
         task.detail_started = True
         task.phase = f"抓取岗位详情 0/{detail_total.group(1)}"
-        task.progress = max(task.progress, 55)
+        task.progress = max(task.progress, 70 if task.publish_started else 55)
         return
     if task.detail_started:
         detail_match = DETAIL_PROGRESS_RE.search(line)
         if detail_match:
             current, total = (int(value) for value in detail_match.groups())
             task.phase = f"抓取岗位详情 {current}/{total}"
-            task.progress = max(task.progress, 55 + round(40 * current / max(total, 1)))
+            start = 70 if task.publish_started else 55
+            task.progress = max(
+                task.progress,
+                start + round((95 - start) * current / max(total, 1)),
+            )
             return
     if "结果 CSV 已保存" in line:
         task.phase = "正在完成输出"
