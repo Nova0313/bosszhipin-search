@@ -53,7 +53,6 @@
     h1 { margin: 0; font-size: clamp(30px, 5vw, 48px); line-height: 1.06; letter-spacing: -.04em; }
     .subtitle { margin: 12px 0 0; color: var(--muted); font-size: 15px; }
     .pure-badge {
-      flex: none;
       border: 1px solid #d9d0ff;
       background: var(--accent-soft);
       color: var(--accent-dark);
@@ -62,6 +61,20 @@
       font-size: 12px;
       font-weight: 750;
     }
+    .header-actions { flex: none; display: flex; align-items: center; gap: 9px; }
+    .account-button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink);
+      padding: 8px 13px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    .account-button:hover { border-color: var(--accent); color: var(--accent-dark); }
     .grid { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(320px, .92fr); gap: 22px; }
     .card {
       background: var(--panel);
@@ -254,7 +267,10 @@
         <h1>BOSS 岗位检索控制台</h1>
         <p class="subtitle">开始前请先启动并登录项目的 BOSS 专用 Chrome，并在运行过程中保持 Chrome 后台运行。</p>
       </div>
-      <div class="pure-badge">纯 Python · 无大模型</div>
+      <div class="header-actions">
+        <button id="switch-account-button" class="account-button" type="button">切换账号</button>
+        <div class="pure-badge">纯 Python · 无大模型</div>
+      </div>
     </header>
 
     <section class="grid">
@@ -381,7 +397,7 @@
             <li>同一时间只允许运行一个 Web 检索任务，避免多个任务并发冲击网站</li>
             <li>检测到未登录、验证码、访问频繁或环境异常时会停止，不会持续重试</li>
             <li>网络请求、Chrome 启动和登录等待都有超时及有限重试</li>
-            <li>全局请求设置 2000 次安全上限保护。职位列表翻页、发布时间读取和岗位 JD 详情抓取会共同消耗该配额。达到上限时会停止后续抓取并保留检查点，下次使用相同规则和检索条件时自动继续</li>
+            <li>全局请求设置 5000 次安全上限保护。职位列表翻页、发布时间读取和岗位 JD 详情抓取会共同消耗该配额。达到上限时会停止后续抓取并保留检查点，下次使用相同规则和检索条件时自动继续</li>
           </ul>
         </div>
       </form>
@@ -423,6 +439,7 @@
     const companyMatchField = document.querySelector('#company-match-field');
     const startButton = document.querySelector('#start-button');
     const cancelButton = document.querySelector('#cancel-button');
+    const switchAccountButton = document.querySelector('#switch-account-button');
     const statePill = document.querySelector('#state-pill');
     const phase = document.querySelector('#phase');
     const percent = document.querySelector('#percent');
@@ -454,6 +471,7 @@
     function setRunning(running) {
       startButton.disabled = running;
       cancelButton.disabled = !running;
+      switchAccountButton.disabled = running;
       form.querySelectorAll('input, select').forEach(element => {
         element.disabled = running;
       });
@@ -610,6 +628,34 @@
         renderStatus(data);
       } catch (error) {
         showMessage(error.message, true);
+      }
+    });
+
+    switchAccountButton.addEventListener('click', async () => {
+      const confirmed = window.confirm(
+        '切换账号会退出 BOSS 专用 Chrome 中的当前账号，不会影响你的主 Chrome。是否继续？'
+      );
+      if (!confirmed) return;
+      switchAccountButton.disabled = true;
+      switchAccountButton.textContent = '正在打开登录页…';
+      resultBox.style.display = 'none';
+      try {
+        const response = await fetch('/api/switch-account', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}'
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '切换账号失败');
+        statePill.textContent = '等待登录';
+        statePill.className = 'state-pill';
+        phase.textContent = '请在 BOSS 专用 Chrome 中登录新账号';
+        showMessage(data.message || '已打开 BOSS 登录页');
+      } catch (error) {
+        showMessage(error.message, true);
+      } finally {
+        switchAccountButton.disabled = startButton.disabled;
+        switchAccountButton.textContent = '切换账号';
       }
     });
   </script>

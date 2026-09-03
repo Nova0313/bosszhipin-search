@@ -65,7 +65,7 @@ HOT_CITY_URL = "https://www.zhipin.com/wapi/zpgeek/search/job/hot/city.json"
 CITY_GROUP_URL = "https://www.zhipin.com/wapi/zpCommon/data/cityGroup.json"
 
 # 请求频率保护
-MAX_API_REQUESTS = 2000  # 单次最大页面/API 请求数
+MAX_API_REQUESTS = 5000  # 单次最大页面/API 请求数
 
 class ChromeExecutableNotFoundError(RuntimeError):
     """No Chromium-compatible browser executable could be found."""
@@ -194,6 +194,11 @@ LOGIN_RESTRICTED_MESSAGE_KEYWORDS = (
     "验证",
 )
 DEFAULT_LOGIN_TIMEOUT = 300
+BOSS_LOGIN_URL = "https://login.zhipin.com/"
+BOSS_ACCOUNT_STORAGE_ORIGINS = (
+    "https://www.zhipin.com",
+    "https://login.zhipin.com",
+)
 
 # 全局请求计数器
 _request_counter = 0
@@ -2931,6 +2936,63 @@ def run_stop_chrome():
     return 0
 
 
+def switch_boss_account(cdp_port=DEFAULT_CDP_PORT, chrome_path=None):
+    """Sign out the dedicated profile and open the BOSS login page.
+
+    Only BOSS site data in the scraper's isolated Chrome profile is cleared;
+    the user's normal Chrome profile is never touched.
+    """
+    setup_result = run_setup_chrome(
+        cdp_port=cdp_port,
+        wait_login=False,
+        chrome_path=chrome_path,
+    )
+    if setup_result != 0:
+        raise CDPConnectionError("无法启动 BOSS 专用 Chrome，请先检查 CDP 环境")
+
+    cdp_data_dir = prepare_cdp_profile(
+        copy_login_state=False,
+        reset=False,
+    )["path"]
+    if not cdp_port_uses_profile(cdp_port, cdp_data_dir):
+        raise CDPConnectionError(
+            f"端口 {cdp_port} 不属于 BOSS 专用 Chrome profile，已拒绝清理登录态"
+        )
+
+    cdp = CDPSession(cdp_port)
+    try:
+        for origin in BOSS_ACCOUNT_STORAGE_ORIGINS:
+            cdp.send("Storage.clearDataForOrigin", {
+                "origin": origin,
+                "storageTypes": "cookies,local_storage",
+            })
+        target_id, session_id = create_page_session(cdp, background=False)
+        cdp.send("Page.navigate", {"url": BOSS_LOGIN_URL}, session_id)
+        cdp.send("Target.activateTarget", {"targetId": target_id})
+    finally:
+        try:
+            cdp.close()
+        except Exception:
+            log.debug("关闭切换账号 CDP 连接时出错", exc_info=True)
+    return BOSS_LOGIN_URL
+
+
+def run_switch_account(cdp_port=DEFAULT_CDP_PORT, chrome_path=None):
+    print("=" * 50)
+    print("  切换 BOSS 登录账号")
+    print("=" * 50)
+    print()
+    try:
+        login_url = switch_boss_account(cdp_port, chrome_path=chrome_path)
+    except (CDPConnectionError, RuntimeError, OSError) as exc:
+        print(f"❌ 切换账号失败: {exc}")
+        return 1
+    print("✅ 已退出 BOSS 专用 Chrome 中的当前账号")
+    print(f"已打开登录页: {login_url}")
+    print("请在专用 Chrome 中登录新账号后再开始检索。")
+    return 0
+
+
 # ============================================================
 # main
 # ============================================================
@@ -3036,6 +3098,8 @@ def main():
                    help=f"--setup-chrome 等待登录完成的秒数 (默认 {DEFAULT_LOGIN_TIMEOUT})")
     p.add_argument("--stop-chrome", action="store_true",
                    help="关闭 BOSS 专用 CDP Chrome（按隔离 profile 精准匹配，不影响主 Chrome）")
+    p.add_argument("--switch-account", action="store_true",
+                   help="退出 BOSS 专用 Chrome 的当前账号并打开登录页")
     p.add_argument("--close-chrome", action="store_true",
                    help="抓取正常结束后自动关闭专用 Chrome（默认不关；异常退出不触发，保留登录态）")
 
@@ -3067,6 +3131,9 @@ def main():
     # --stop-chrome 模式（关闭 BOSS 专用 CDP Chrome，独立命令）
     if args.stop_chrome:
         sys.exit(run_stop_chrome())
+
+    if args.switch_account:
+        sys.exit(run_switch_account(args.cdp_port, chrome_path=args.chrome_path))
 
     if not require_runtime_dependencies("requests", "websocket"):
         sys.exit(1)

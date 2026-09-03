@@ -143,7 +143,7 @@ class HtmlContentTests(unittest.TestCase):
         self.assertIn("计算方式：", self.html)
         self.assertIn("安全保护条例", self.html)
         self.assertIn("搜索组合默认最多 64 个", self.html)
-        self.assertIn("全局请求设置 2000 次", self.html)
+        self.assertIn("全局请求设置 5000 次", self.html)
         self.assertNotIn("全局请求设置 500 次", self.html)
 
     def test_removed_path_hint_and_ten_page_input_cap(self):
@@ -154,6 +154,11 @@ class HtmlContentTests(unittest.TestCase):
         self.assertIn('id="published-from" type="date"', self.html)
         self.assertIn('id="published-to" type="date"', self.html)
         self.assertIn('value="publish_date" checked', self.html)
+
+    def test_switch_account_entry_and_confirmation_are_present(self):
+        self.assertIn('id="switch-account-button"', self.html)
+        self.assertIn("/api/switch-account", self.html)
+        self.assertIn("不会影响你的主 Chrome", self.html)
 
 
 class ProgressTests(unittest.TestCase):
@@ -218,6 +223,27 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(pathlib.Path(task.csv_path), result_dir / "jobs.csv")
             self.assertEqual(pathlib.Path(task.json_path), result_dir / "jobs.json")
             thread.return_value.start.assert_called_once_with()
+
+    def test_switch_account_is_blocked_while_scrape_is_active(self):
+        manager = module.ScrapeTaskManager()
+        manager._tasks["active"] = module.ScrapeTask(
+            "active", "keyword", "rules.csv", "jobs.csv", [], state="running"
+        )
+        with mock.patch.object(module.boss, "switch_boss_account") as switch:
+            with self.assertRaisesRegex(module.WebRequestError, "请先停止任务"):
+                manager.switch_account()
+        switch.assert_not_called()
+
+    def test_switch_account_uses_dedicated_chrome_helper(self):
+        manager = module.ScrapeTaskManager()
+        with mock.patch.object(
+            module.boss,
+            "switch_boss_account",
+            return_value="https://login.zhipin.com/",
+        ) as switch:
+            login_url = manager.switch_account()
+        self.assertEqual(login_url, "https://login.zhipin.com/")
+        switch.assert_called_once_with()
 
 
 class PackagingTests(unittest.TestCase):

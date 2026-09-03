@@ -353,6 +353,22 @@ class ScrapeTaskManager:
             process.terminate()
         return task
 
+    def switch_account(self) -> str:
+        """Clear only the dedicated BOSS session while no scrape is active."""
+        with self._lock:
+            active = next(
+                (task for task in self._tasks.values() if task.state in {
+                    "queued", "running", "cancelling",
+                }),
+                None,
+            )
+            if active:
+                raise WebRequestError("检索任务运行期间不能切换账号，请先停止任务")
+            try:
+                return boss.switch_boss_account()
+            except (boss.CDPConnectionError, RuntimeError, OSError) as exc:
+                raise WebRequestError(f"切换账号失败: {exc}") from exc
+
     def _run(self, task: ScrapeTask) -> None:
         with self._lock:
             task.state = "running"
@@ -439,6 +455,13 @@ class WebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/cancel":
                 task = TASK_MANAGER.cancel(str(payload.get("job_id", "")))
                 self._send_json(task.public_data())
+                return
+            if parsed.path == "/api/switch-account":
+                login_url = TASK_MANAGER.switch_account()
+                self._send_json({
+                    "message": "已退出当前账号，请在 BOSS 专用 Chrome 中登录新账号",
+                    "login_url": login_url,
+                })
                 return
             self._send_json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
         except WebRequestError as exc:

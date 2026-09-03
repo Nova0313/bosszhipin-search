@@ -360,7 +360,7 @@ class ChromeSetupTests(unittest.TestCase):
 
     def test_filter_maps_match_current_boss_condition_snapshot(self):
         module = load_module()
-        self.assertEqual(module.MAX_API_REQUESTS, 2000)
+        self.assertEqual(module.MAX_API_REQUESTS, 5000)
 
         self.assertEqual(
             module.SALARY_MAP,
@@ -1670,6 +1670,46 @@ class ChromeSetupTests(unittest.TestCase):
                 rc = module.run_stop_chrome()
             self.assertEqual(rc, 0)
 
+    def test_switch_account_clears_only_boss_storage_and_opens_login(self):
+        module = load_module()
+        cdp = mock.Mock()
+        with mock.patch.object(module, "run_setup_chrome", return_value=0) as setup, \
+                mock.patch.object(
+                    module, "prepare_cdp_profile", return_value={"path": "/boss-profile"}
+                ), mock.patch.object(
+                    module, "cdp_port_uses_profile", return_value=True
+                ), mock.patch.object(module, "CDPSession", return_value=cdp), \
+                mock.patch.object(
+                    module, "create_page_session", return_value=("target-1", "session-1")
+                ) as create_page:
+            login_url = module.switch_boss_account(cdp_port=9333)
+
+        self.assertEqual(login_url, "https://login.zhipin.com/")
+        setup.assert_called_once_with(cdp_port=9333, wait_login=False, chrome_path=None)
+        create_page.assert_called_once_with(cdp, background=False)
+        for origin in module.BOSS_ACCOUNT_STORAGE_ORIGINS:
+            cdp.send.assert_any_call("Storage.clearDataForOrigin", {
+                "origin": origin,
+                "storageTypes": "cookies,local_storage",
+            })
+        cdp.send.assert_any_call(
+            "Page.navigate", {"url": module.BOSS_LOGIN_URL}, "session-1"
+        )
+        cdp.send.assert_any_call("Target.activateTarget", {"targetId": "target-1"})
+        cdp.close.assert_called_once_with()
+
+    def test_switch_account_rejects_non_dedicated_cdp_profile(self):
+        module = load_module()
+        with mock.patch.object(module, "run_setup_chrome", return_value=0), \
+                mock.patch.object(
+                    module, "prepare_cdp_profile", return_value={"path": "/boss-profile"}
+                ), mock.patch.object(
+                    module, "cdp_port_uses_profile", return_value=False
+                ), mock.patch.object(module, "CDPSession") as session:
+            with self.assertRaisesRegex(module.CDPConnectionError, "拒绝清理"):
+                module.switch_boss_account(cdp_port=9333)
+        session.assert_not_called()
+
     def test_help_does_not_require_cdp_runtime_dependencies(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "--help"],
@@ -1686,6 +1726,7 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertIn("--no-wait-login", result.stdout)
         self.assertIn("--login-timeout", result.stdout)
         self.assertIn("--stop-chrome", result.stdout)
+        self.assertIn("--switch-account", result.stdout)
         self.assertIn("--close-chrome", result.stdout)
 
 

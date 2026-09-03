@@ -20,6 +20,13 @@ python scripts/boss_cdp_raw.py --setup-chrome
 ```
 
 在打开的 Chrome 中登录 BOSS 直聘，后续检索时保持该 Chrome 运行。登录状态保存在独立目录，不会使用主 Chrome 的 Cookie。
+需要更换登录账号时，可在 Web 控制台右上角点击“切换账号”，或运行：
+
+```bash
+python scripts/boss_cdp_raw.py --switch-account
+```
+
+该操作只会清理 BOSS 专用 Chrome profile 中的 BOSS 登录状态，不影响主 Chrome。检索任务运行期间不允许切换账号。
 
 ## 使用路线一：HTML GUI
 
@@ -107,7 +114,7 @@ python -m scripts.batch_search examples/keyword_rules.csv --dry-run
 `datePosted`、`publishTime`、发布时间或更新时间文本。无法识别可靠时间的岗位会被
 排除并计入日志；该步骤会增加详情页请求次数。候选岗位列表和发布时间进度会保存到
 输出根目录的 `.checkpoints` 中；任务中断后，使用相同规则表和检索条件重新运行即可
-自动继续。完整成功后会删除检查点。单次任务的全局页面/API 请求上限为 2000 次。
+自动继续。完整成功后会删除检查点。单次任务的全局页面/API 请求上限为 5000 次。
 
 ## 检索规则
 
