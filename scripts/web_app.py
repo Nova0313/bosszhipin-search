@@ -161,7 +161,7 @@ def normalize_start_request(payload: dict) -> dict:
             raise WebRequestError("每个组合的页数必须是正整数，或留空抓取全部页")
 
     try:
-        interval = float(payload.get("interval", 8))
+        interval = float(payload.get("interval", 10))
     except (TypeError, ValueError) as exc:
         raise WebRequestError("抓取时间间隔必须是数字") from exc
     if interval < 0 or interval > 600:

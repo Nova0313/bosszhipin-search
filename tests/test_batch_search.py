@@ -273,7 +273,7 @@ class ExecutionTests(unittest.TestCase):
         def fake_scrape(keyword, *_args, **_kwargs):
             return {
                 "jobs": [
-                    {"job_id": "same", "title": "后端工程师", "job_link": "https://example/same"},
+                    {"job_id": "same", "title": "Python Go后端工程师", "job_link": "https://example/same"},
                     {"job_id": keyword, "title": keyword},
                 ]
             }
@@ -288,7 +288,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(len(shared["matched_conditions"]), 2)
         self.assertEqual(len(runs), 2)
 
-    def test_interval_is_passed_to_each_search_and_used_between_combinations(self):
+    def test_request_interval_is_forwarded_and_combination_wait_is_fixed(self):
         combinations = [
             module.SearchCombination("Python", "上海", "101020100", "406", "105"),
             module.SearchCombination("Go", "上海", "101020100", "406", "105"),
@@ -306,7 +306,7 @@ class ExecutionTests(unittest.TestCase):
             )
 
         self.assertEqual(request_intervals, [2.5, 2.5])
-        sleep.assert_called_once_with(2.5)
+        sleep.assert_called_once_with(module.COMBINATION_INTERVAL_SECONDS)
 
     def test_execute_plan_resumes_after_completed_combination(self):
         combinations = [
@@ -419,7 +419,7 @@ class ExecutionTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             scrape_details.assert_called_once()
-            self.assertEqual(scrape_details.call_args.kwargs["request_interval"], 8.0)
+            self.assertEqual(scrape_details.call_args.kwargs["request_interval"], 10.0)
             result_dirs = list(output_root.iterdir())
             self.assertEqual(len(result_dirs), 1)
             result_dir = result_dirs[0]

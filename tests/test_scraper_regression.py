@@ -1022,6 +1022,39 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertEqual(module.map_api_jobs(None), [])
         self.assertEqual(module.map_api_jobs({"zpData": {}}), [])
 
+    def test_job_title_keyword_match_is_case_and_whitespace_insensitive(self):
+        module = load_module()
+
+        self.assertTrue(
+            module.job_title_matches_keyword(
+                "AI Infra", {"title": "AI  INFRA 工程师"},
+            )
+        )
+        self.assertTrue(
+            module.job_title_matches_keyword(
+                "Java 风控", {"title": "Java 开发工程师（风控方向）"},
+            )
+        )
+        self.assertFalse(
+            module.job_title_matches_keyword(
+                "AI Infra", {"title": "Java 工程师"},
+            )
+        )
+
+    def test_job_title_fuzzy_match_has_no_four_character_minimum(self):
+        module = load_module()
+
+        self.assertTrue(
+            module.job_title_matches_keyword(
+                "机器认", {"title": "机器人工程师"},
+            )
+        )
+        self.assertFalse(
+            module.job_title_matches_keyword(
+                "机器认", {"title": "财务会计"},
+            )
+        )
+
     def test_login_probe_uses_one_budgeted_request(self):
         module = load_module()
         body = json.dumps({
@@ -1085,6 +1118,7 @@ class ChromeSetupTests(unittest.TestCase):
                 mock.patch.object(module, "random", random.Random(7)):
             return module.scrape_list(
                 "Java", "上海", pages, {}, output_path, cdp_port=9333,
+                job_matcher=lambda _job: True,
             )
 
     def test_scrape_list_captures_pages_via_network_events(self):
@@ -1117,6 +1151,46 @@ class ChromeSetupTests(unittest.TestCase):
         ]
         self.assertTrue(evaluate_bodies)
         self.assertFalse(any("XMLHttpRequest" in js for js in evaluate_bodies))
+
+    def test_scrape_list_stops_at_five_consecutive_keyword_misses(self):
+        module = load_module()
+        titles = [
+            "Java 开发",
+            "Python 1", "Python 2", "Python 3", "Python 4",
+            "JAVA 架构师",
+            "Go 1", "Go 2", "Go 3", "Go 4", "Go 5",
+            "Java 不应被处理",
+        ]
+        page = {"code": 0, "zpData": {"hasMore": True, "jobList": [
+            {
+                "jobName": title,
+                "salaryDesc": "20K",
+                "encryptJobId": f"job-{index}",
+            }
+            for index, title in enumerate(titles)
+        ]}}
+        cdp = FakeCaptureCDP(
+            pending_batches=[make_joblist_events("r1")],
+            responses={"r1": json.dumps(page)},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(module, "CDPSession", lambda port=9222: cdp), \
+                mock.patch.object(module, "resolve_city", return_value=("上海", "101020100")), \
+                mock.patch("time.sleep", lambda _seconds: None), \
+                mock.patch.object(module, "random", random.Random(7)):
+            output_path = str(pathlib.Path(tmp) / "jobs.json")
+            result = module.scrape_list(
+                "Java", "上海", 3, {}, output_path, cdp_port=9333,
+            )
+
+        self.assertEqual(
+            [job["title"] for job in result["jobs"]],
+            ["Java 开发", "JAVA 架构师"],
+        )
+        self.assertTrue(result["stopped_by_mismatch_limit"])
+        self.assertEqual(result["jobs_found_raw"], len(titles))
+        self.assertEqual(module._request_counter, 1)
 
     def test_scrape_list_all_pages_stops_when_boss_reports_no_next_page(self):
         module = load_module()

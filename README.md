@@ -103,7 +103,7 @@ python -m scripts.batch_search examples/keyword_rules.csv --dry-run
 常用参数：
 
 - `--pages 5`：每个搜索组合最多抓取 5 页；不填则抓取所有页。
-- `--interval 8`：请求间隔秒数。
+- `--interval 10`：列表翻页和岗位详情的请求间隔秒数；组合间固定等待 10 秒。
 - `--no-detail`：不抓取 JD。
 - `--max-details 100`：最多抓取 100 个 JD。
 - `--published-from 2026-08-01`：仅保留该日期及之后发布/更新的岗位。
@@ -136,6 +136,8 @@ python -m scripts.batch_search examples/keyword_rules.csv --dry-run
 - 求职类型列可选，支持“不限”、“全职”和“兼职”；省略该列时默认不限。
 - 各列长度可以不同，行之间没有对应关系。
 - 默认最多生成 64 个搜索组合。
+- 每页岗位会按返回顺序再做一次匹配：关键词模式对职位名称先做包含匹配，未命中时再做模糊匹配（不限关键词长度，多个空白分隔词均须匹配）；公司模式匹配公司名。
+- 连续 5 个岗位都未匹配当前检索词时，会立即结束当前搜索组合并进入下一个；期间匹配成功会将连续计数清零。
 
 可直接参考 [关键词规则](examples/keyword_rules.csv) 和 [公司规则](examples/company_rules.csv)。
 

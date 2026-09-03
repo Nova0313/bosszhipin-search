@@ -33,6 +33,7 @@ import os
 import re
 import hashlib
 import csv
+import difflib
 import glob
 import platform
 import calendar
@@ -41,6 +42,7 @@ import shutil
 import signal
 import logging
 import ntpath
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from collections import Counter
@@ -725,6 +727,54 @@ def map_api_jobs(data):
     if not isinstance(job_list, list):
         return []
     return [j for j in (map_api_job(item) for item in job_list) if j]
+
+
+CONSECUTIVE_JOB_MISMATCH_LIMIT = 5
+KEYWORD_FUZZY_MATCH_THRESHOLD = 0.3
+
+
+def normalize_keyword_match_text(value):
+    """Normalize text for a case-insensitive keyword containment check."""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value or "")).casefold())
+
+
+def fuzzy_text_contains(needle, haystack, threshold=KEYWORD_FUZZY_MATCH_THRESHOLD):
+    """Match text exactly first, then compare similarly sized substrings."""
+    if not needle or not haystack:
+        return False
+    if needle in haystack:
+        return True
+
+    target_length = len(needle)
+    shortest = max(1, target_length - 1)
+    longest = min(len(haystack), target_length + 1)
+    if shortest > longest:
+        return difflib.SequenceMatcher(None, needle, haystack, autojunk=False).ratio() >= threshold
+
+    for window_length in range(shortest, longest + 1):
+        for start in range(len(haystack) - window_length + 1):
+            candidate = haystack[start:start + window_length]
+            similarity = difflib.SequenceMatcher(
+                None, needle, candidate, autojunk=False,
+            ).ratio()
+            if similarity >= threshold:
+                return True
+    return False
+
+
+def job_title_matches_keyword(keyword, job):
+    """Fuzzy-match every whitespace-delimited keyword term against the job title."""
+    keyword_text = unicodedata.normalize("NFKC", str(keyword or "")).casefold().strip()
+    keyword_terms = [
+        normalize_keyword_match_text(term)
+        for term in re.split(r"\s+", keyword_text)
+        if term
+    ]
+    normalized_title = normalize_keyword_match_text((job or {}).get("title"))
+    return bool(keyword_terms) and all(
+        fuzzy_text_contains(term, normalized_title)
+        for term in keyword_terms
+    )
 
 
 # ============================================================
@@ -1749,11 +1799,20 @@ def load_existing_details(input_path=None, detail_output=None, result_dir=DEFAUL
 # ============================================================
 def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 cdp_port=DEFAULT_CDP_PORT, fmt="json", allow_dom_fallback=False,
-                request_interval=None):
+                request_interval=None, job_matcher=None,
+                consecutive_mismatch_limit=CONSECUTIVE_JOB_MISMATCH_LIMIT):
     city_name, city_code = resolve_city(city_input)
     cdp = CDPSession(cdp_port)
     all_jobs = []
     seen = set()
+    seen_raw = set()
+    raw_job_count = 0
+    consecutive_mismatches = 0
+    stopped_by_mismatch_limit = False
+    if job_matcher is None:
+        job_matcher = lambda job: job_title_matches_keyword(keyword, job)
+    if consecutive_mismatch_limit <= 0:
+        raise ValueError("consecutive_mismatch_limit must be greater than 0")
     if not output_path:
         output_path = default_output_path("jobs")
 
@@ -1919,8 +1978,30 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 continue
 
             new = 0
+            raw_new = 0
+            raw_job_count += len(jobs)
             for j in jobs:
                 key = j.get('job_link') or j['title']
+                if key not in seen_raw:
+                    seen_raw.add(key)
+                    raw_new += 1
+
+                if not job_matcher(j):
+                    consecutive_mismatches += 1
+                    print(
+                        f"  ✗ {j.get('title', '')} | 未匹配当前关键词"
+                        f" ({consecutive_mismatches}/{consecutive_mismatch_limit})"
+                    )
+                    if consecutive_mismatches >= consecutive_mismatch_limit:
+                        stopped_by_mismatch_limit = True
+                        print(
+                            f"  已连续 {consecutive_mismatch_limit} 个岗位未匹配当前关键词，"
+                            "结束该搜索组合\n"
+                        )
+                        break
+                    continue
+
+                consecutive_mismatches = 0
                 j['job_id'] = hashlib.md5(key.encode()).hexdigest()[:16]
                 if key in seen:
                     continue
@@ -1935,7 +2016,10 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                     extra += f" | {active}"
                 print(f"  ✓ {j['title']} | {salary} | {j.get('location','')} | {j.get('boss_name','')}{extra}")
 
-            print(f"  本页 {len(jobs)} 条, 新增 {new}, 累计 {len(all_jobs)}")
+            print(
+                f"  本页 {len(jobs)} 条, 新增匹配 {new}, "
+                f"累计匹配 {len(all_jobs)}"
+            )
 
             # 每页抓完就写入文件，异常退出也能保留
             if output_path:
@@ -1947,11 +2031,14 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                     "scraped_at": datetime.now().isoformat(),
                 }, all_jobs)
 
+            if stopped_by_mismatch_limit:
+                break
+
             if reached_end:
                 print("  已到最后一页（hasMore=false），提前结束\n")
                 break
 
-            if max_pages is None and new == 0:
+            if max_pages is None and raw_new == 0:
                 print("  当前页没有新增岗位，结束该搜索组合，避免重复翻页\n")
                 break
 
@@ -2005,7 +2092,14 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
     else:
         print("无数据")
 
-    return {"keyword": keyword, "city": city_name, "total": len(all_jobs), "jobs": all_jobs}
+    return {
+        "keyword": keyword,
+        "city": city_name,
+        "total": len(all_jobs),
+        "jobs_found_raw": raw_job_count,
+        "stopped_by_mismatch_limit": stopped_by_mismatch_limit,
+        "jobs": all_jobs,
+    }
 
 
 # ============================================================

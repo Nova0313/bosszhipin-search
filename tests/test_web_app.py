@@ -20,7 +20,7 @@ class RequestValidationTests(unittest.TestCase):
         self.assertEqual(options["pages"], 2)
         self.assertEqual(options["output_root"].name, "results")
         self.assertIsNone(options["max_details"])
-        self.assertEqual(options["interval"], 8)
+        self.assertEqual(options["interval"], 10)
         self.assertTrue(options["fetch_jd"])
         self.assertEqual(options["published_from"], "")
         self.assertEqual(options["published_to"], "")

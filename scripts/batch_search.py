@@ -43,6 +43,7 @@ __version__ = boss.__version__
 MODE_KEYWORD = "keyword"
 MODE_COMPANY = "company"
 MODE_LABELS = {MODE_KEYWORD: "关键词", MODE_COMPANY: "公司"}
+COMBINATION_INTERVAL_SECONDS = 10.0
 COMMON_REQUIRED_COLUMNS = ("city", "salary", "experience")
 HEADER_ALIASES = {
     "keyword": {"搜索关键词", "关键词", "职位关键词", "keyword", "keywords", "query"},
@@ -526,6 +527,21 @@ def company_name_matches(expected: str, actual: str, strategy: str = "contains")
     )
 
 
+def job_matches_combination(
+    combination: SearchCombination,
+    job: dict,
+    company_match: str = "contains",
+) -> bool:
+    """Apply the current combination's post-search match to one list job."""
+    if combination.mode == MODE_COMPANY:
+        return company_name_matches(
+            combination.search_term,
+            job.get("boss_name") or job.get("company") or "",
+            company_match,
+        )
+    return boss.job_title_matches_keyword(combination.search_term, job)
+
+
 def execute_plan(
     combinations: list[SearchCombination],
     pages: int | None,
@@ -570,23 +586,29 @@ def execute_plan(
                 fmt="json",
                 allow_dom_fallback=allow_dom_fallback,
                 request_interval=delay,
+                job_matcher=lambda job: job_matches_combination(
+                    combination, job, company_match,
+                ),
             )
             raw_jobs = data.get("jobs", []) if isinstance(data, dict) else []
-            if combination.mode == MODE_COMPANY:
-                found_jobs = [
-                    job for job in raw_jobs
-                    if company_name_matches(
-                        combination.search_term,
-                        job.get("boss_name") or job.get("company") or "",
-                        company_match,
-                    )
-                ]
-            else:
-                found_jobs = raw_jobs
+            # scrape_list filters jobs incrementally so it can stop immediately
+            # after five consecutive misses. Keep this validation for injected
+            # scrape functions and older integrations that return unfiltered jobs.
+            found_jobs = [
+                job for job in raw_jobs
+                if job_matches_combination(combination, job, company_match)
+            ]
             runs.append({
                 **condition,
-                "jobs_found_raw": len(raw_jobs),
+                "jobs_found_raw": (
+                    data.get("jobs_found_raw", len(raw_jobs))
+                    if isinstance(data, dict) else len(raw_jobs)
+                ),
                 "jobs_matched": len(found_jobs),
+                "stopped_after_consecutive_mismatches": bool(
+                    data.get("stopped_by_mismatch_limit", False)
+                    if isinstance(data, dict) else False
+                ),
             })
             for raw_job in found_jobs:
                 job = dict(raw_job)
@@ -600,7 +622,7 @@ def execute_plan(
             if progress_callback:
                 progress_callback(list(jobs_by_key.values()), runs, index)
             if index < len(combinations) and delay > 0:
-                wait_seconds = delay
+                wait_seconds = COMBINATION_INTERVAL_SECONDS
                 print(f"组合间等待 {wait_seconds:.1f}s，降低请求密度...")
                 time.sleep(wait_seconds)
     return list(jobs_by_key.values()), runs
@@ -650,7 +672,7 @@ FINAL_CSV_COLUMNS = [
     "publish_date", "jd",
 ]
 DEFAULT_RESULT_ROOT = Path(__file__).resolve().parents[1] / "result"
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 2
 
 
 def search_checkpoint_fingerprint(
@@ -918,8 +940,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="每个搜索组合的页数上限（默认全部；手动设置正整数）")
     parser.add_argument("--max-combinations", type=int, default=64,
                         help="表格最大展开组合数（默认 64）")
-    parser.add_argument("--interval", "--delay", dest="interval", type=float, default=8.0,
-                        help="组合、翻页和岗位详情之间的等待秒数（默认 8）")
+    parser.add_argument("--interval", "--delay", dest="interval", type=float, default=10.0,
+                        help="翻页和岗位详情之间的等待秒数（默认 10）；组合间固定等待 10 秒")
     parser.add_argument("--dry-run", action="store_true",
                         help="只校验表格并展示组合，不连接 Chrome")
     parser.add_argument("--output-dir", "--output", dest="output_dir", default=None,

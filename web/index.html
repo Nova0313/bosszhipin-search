@@ -323,7 +323,7 @@
             </div>
             <div>
               <label for="interval">抓取时间间隔（秒）</label>
-              <input id="interval" type="number" min="0" max="600" step="0.5" value="8">
+              <input id="interval" type="number" min="0" max="600" step="0.5" value="10">
             </div>
           </div>
           <div class="field">
@@ -393,7 +393,7 @@
           <ul>
             <li>搜索组合默认最多 64 个，避免规则笛卡尔积突然膨胀</li>
             <li>“抓取所有页”会在无更多数据、空页或没有新增岗位时自动停止，防止死循环</li>
-            <li>默认请求间隔 8 秒，列表翻页、组合切换和 JD 详情请求都会等待</li>
+            <li>列表翻页、JD 详情请求和组合切换默认都等待 10 秒</li>
             <li>启用发布时间区间后，需要逐个读取岗位详情页，会增加请求次数；没有可靠时间信息的岗位不会猜测日期</li>
             <li>同一时间只允许运行一个 Web 检索任务，避免多个任务并发冲击网站</li>
             <li>检测到未登录、验证码、访问频繁或环境异常时会停止，不会持续重试</li>
