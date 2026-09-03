@@ -407,7 +407,12 @@ class CDPSession:
             raise RuntimeError("缺少 CDP 运行依赖")
         self.cdp_port = cdp_port
         ws_url = fetch_cdp_version(cdp_port, timeout=10)["webSocketDebuggerUrl"]
-        self.ws = websocket.create_connection(ws_url, timeout=60)
+        try:
+            self.ws = websocket.create_connection(ws_url, timeout=60)
+        except (OSError, websocket.WebSocketException) as exc:
+            raise CDPConnectionError(
+                f"Chrome CDP WebSocket 连接失败（{cdp_port}）: {exc}"
+            ) from exc
         self.mid = 0
         # CDP 事件缓冲：send() 等待命令响应期间到达的事件通知都会存这里，
         # 供 Network 域被动捕获使用（见 NetworkJoblistCapture）。
@@ -432,7 +437,12 @@ class CDPSession:
         msg = {"id": self.mid, "method": method, "params": params or {}}
         if sid:
             msg["sessionId"] = sid
-        self.ws.send(json.dumps(msg))
+        try:
+            self.ws.send(json.dumps(msg))
+        except (OSError, websocket.WebSocketException) as exc:
+            raise CDPConnectionError(
+                f"Chrome CDP 连接已中断（发送 {method} 时）: {exc}"
+            ) from exc
 
         start_time = time.time()
         max_retries = 1000
@@ -450,6 +460,10 @@ class CDPSession:
                 raw = self.ws.recv()
             except websocket.WebSocketTimeoutException:
                 raise TimeoutError(f"CDP WebSocket recv 超时, method={method}")
+            except (OSError, websocket.WebSocketException) as exc:
+                raise CDPConnectionError(
+                    f"Chrome CDP 连接已中断（等待 {method} 响应时）: {exc}"
+                ) from exc
 
             try:
                 r = json.loads(raw)
@@ -485,6 +499,10 @@ class CDPSession:
                     raw = self.ws.recv()
                 except websocket.WebSocketTimeoutException:
                     continue
+                except (OSError, websocket.WebSocketException) as exc:
+                    raise CDPConnectionError(
+                        f"Chrome CDP 连接已中断（读取网络事件时）: {exc}"
+                    ) from exc
                 try:
                     r = json.loads(raw)
                 except (json.JSONDecodeError, ValueError):
@@ -493,7 +511,10 @@ class CDPSession:
                     self.events.append(r)
         finally:
             # 恢复默认超时，避免影响后续 send() 的等待
-            self.ws.settimeout(60)
+            try:
+                self.ws.settimeout(60)
+            except (OSError, websocket.WebSocketException):
+                pass
 
     def eval_js(self, js, sid):
         r = self.send("Runtime.evaluate", {"expression": js, "returnByValue": True}, sid)
@@ -1947,11 +1968,21 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
 
     except KeyboardInterrupt:
         print("\n中断")
+    except CDPConnectionError:
+        raise
     except RuntimeError as e:
         print(f"\n⚠️ {e}")
     finally:
-        cdp.send("Target.closeTarget", {"targetId": tid})
-        cdp.close()
+        # CDP 可能正是因为 Chrome 关闭或 WebSocket 断开而退出。
+        # 清理失败不应覆盖上方更有信息量的原始异常。
+        try:
+            cdp.send("Target.closeTarget", {"targetId": tid})
+        except Exception:
+            log.debug("关闭列表抓取 target 失败", exc_info=True)
+        try:
+            cdp.close()
+        except Exception:
+            log.debug("关闭列表抓取 CDP 连接失败", exc_info=True)
 
     print(f"\n{'='*60}")
     print(f"完成: {len(all_jobs)} 条")
@@ -2172,7 +2203,8 @@ def scrape_publish_times(
 
 
 def scrape_details(list_data, max_details=None, output_path=None,
-                   cdp_port=DEFAULT_CDP_PORT, fmt="json", request_interval=None):
+                   cdp_port=DEFAULT_CDP_PORT, fmt="json", request_interval=None,
+                   initial_results=None):
     jobs = list_data.get("jobs", [])
     if max_details:
         jobs = jobs[:max_details]
@@ -2180,13 +2212,26 @@ def scrape_details(list_data, max_details=None, output_path=None,
         output_path = default_output_path("details")
 
     print(f"\n=== 抓取岗位详情 ({len(jobs)} 个) ===\n")
-    results = []
-    seen_links = set()
+    results = [dict(item) for item in (initial_results or []) if isinstance(item, dict)]
+    completed_job_ids = {
+        str(item.get("job_id")) for item in results if item.get("job_id")
+    }
+    seen_links = {
+        str(item.get("job_link") or item.get("link"))
+        for item in results
+        if item.get("job_link") or item.get("link")
+    }
+    if results:
+        print(f"已加载详情检查点: {len(results)}/{len(jobs)}\n")
 
     for idx, job in enumerate(jobs):
         link = job.get("job_link", "")
         title = job.get("title", "")
         company = job.get("boss_name", "")
+        job_id = str(job.get("job_id") or "")
+        if (job_id and job_id in completed_job_ids) or (link and link in seen_links):
+            print(f"[{idx+1}/{len(jobs)}] 检查点已完成，跳过: {company} - {title}")
+            continue
         if not link:
             continue
 
@@ -2265,6 +2310,8 @@ def scrape_details(list_data, max_details=None, output_path=None,
 
         detail = build_detail_record(job, d)
         results.append(detail)
+        if detail.get("job_id"):
+            completed_job_ids.add(str(detail["job_id"]))
 
         if d.get("tags"):
             print(f"  技能: {', '.join(d['tags'])}")

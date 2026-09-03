@@ -36,6 +36,10 @@ DETAIL_TOTAL_RE = re.compile(r"===\s*抓取岗位详情\s*\((\d+)\s*个\)")
 DETAIL_PROGRESS_RE = re.compile(r"^\[(\d+)/(\d+)\]")
 PUBLISH_TOTAL_RE = re.compile(r"===\s*读取岗位发布时间\s*\((\d+)\s*个\)")
 PUBLISH_PROGRESS_RE = re.compile(r"^\[发布时间\s+(\d+)/(\d+)\]")
+CHECKPOINT_PROGRESS_RE = re.compile(
+    r"已加载检查点:.*列表组合\s+(\d+)/(\d+)，发布时间\s+(\d+)/(\d+)"
+)
+DETAIL_CHECKPOINT_RE = re.compile(r"已加载详情检查点:\s*(\d+)/(\d+)")
 
 
 class WebRequestError(ValueError):
@@ -62,6 +66,7 @@ class ScrapeTask:
     finished_at: str = ""
     detail_started: bool = False
     publish_started: bool = False
+    resumed_from: str = ""
     process: Optional[subprocess.Popen] = field(default=None, repr=False)
 
     def public_data(self, offset: int = 0) -> dict:
@@ -82,6 +87,8 @@ class ScrapeTask:
             "finished_at": self.finished_at,
             "logs": self.logs[safe_offset:],
             "next_offset": len(self.logs),
+            "can_resume": self.state in {"failed", "cancelled"},
+            "resumed_from": self.resumed_from,
         }
 
 
@@ -248,6 +255,35 @@ def build_command(options: dict) -> list[str]:
 
 
 def update_progress_from_line(task: ScrapeTask, line: str) -> None:
+    detail_checkpoint = DETAIL_CHECKPOINT_RE.search(line)
+    if detail_checkpoint:
+        completed, total = (int(value) for value in detail_checkpoint.groups())
+        task.detail_started = True
+        task.phase = f"从断点继续抓取详情 {completed}/{total}"
+        task.progress = max(
+            task.progress,
+            70 + round(25 * completed / max(total, 1)),
+        )
+        return
+    checkpoint = CHECKPOINT_PROGRESS_RE.search(line)
+    if checkpoint:
+        completed, total, publish_completed, publish_total = (
+            int(value) for value in checkpoint.groups()
+        )
+        if publish_completed:
+            task.publish_started = True
+            task.phase = f"从断点继续读取发布时间 {publish_completed}/{publish_total}"
+            task.progress = max(
+                task.progress,
+                52 + round(16 * publish_completed / max(publish_total, 1)),
+            )
+        else:
+            task.phase = f"从断点继续列表检索 {completed}/{total}"
+            task.progress = max(
+                task.progress,
+                8 + round(42 * completed / max(total, 1)),
+            )
+        return
     list_match = LIST_PROGRESS_RE.search(line)
     if list_match:
         current, total = (int(value) for value in list_match.groups())
@@ -329,6 +365,41 @@ class ScrapeTaskManager:
                 csv_path=csv_path,
                 json_path=json_path,
                 fetch_jd=options["fetch_jd"],
+            )
+            self._tasks[task.job_id] = task
+        threading.Thread(target=self._run, args=(task,), daemon=True).start()
+        return task
+
+    def resume(self, job_id: str) -> ScrapeTask:
+        """Restart a terminal task with its original command and result directory.
+
+        ``batch_search`` owns the durable checkpoint. Reusing the exact command
+        lets it load completed combinations/publication dates instead of
+        creating a fresh search plan or output directory.
+        """
+        previous = self.get(job_id)
+        with self._lock:
+            active = next(
+                (task for task in self._tasks.values() if task.state in {
+                    "queued", "running", "cancelling",
+                }),
+                None,
+            )
+            if active:
+                raise WebRequestError("已有检索任务正在运行，请等待完成或先停止任务")
+            if previous.state not in {"failed", "cancelled"}:
+                raise WebRequestError("只能继续已失败或已停止的任务")
+            task = ScrapeTask(
+                job_id=uuid.uuid4().hex,
+                mode=previous.mode,
+                table_path=previous.table_path,
+                output_path=previous.output_path,
+                command=list(previous.command),
+                csv_path=previous.csv_path,
+                json_path=previous.json_path,
+                fetch_jd=previous.fetch_jd,
+                phase="准备从检查点继续",
+                resumed_from=previous.job_id,
             )
             self._tasks[task.job_id] = task
         threading.Thread(target=self._run, args=(task,), daemon=True).start()
@@ -455,6 +526,10 @@ class WebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/cancel":
                 task = TASK_MANAGER.cancel(str(payload.get("job_id", "")))
                 self._send_json(task.public_data())
+                return
+            if parsed.path == "/api/resume":
+                task = TASK_MANAGER.resume(str(payload.get("job_id", "")))
+                self._send_json(task.public_data(), HTTPStatus.ACCEPTED)
                 return
             if parsed.path == "/api/switch-account":
                 login_url = TASK_MANAGER.switch_account()

@@ -37,6 +37,24 @@ def load_module():
 
 
 class ChromeSetupTests(unittest.TestCase):
+    def test_cdp_send_wraps_broken_pipe_as_actionable_connection_error(self):
+        module = load_module()
+        module.websocket = mock.Mock(
+            WebSocketException=ConnectionError,
+            WebSocketTimeoutException=TimeoutError,
+        )
+        session = object.__new__(module.CDPSession)
+        session.mid = 0
+        session.events = []
+        session.ws = mock.Mock()
+        session.ws.send.side_effect = BrokenPipeError(32, "Broken pipe")
+
+        with self.assertRaisesRegex(
+            module.CDPConnectionError,
+            r"Chrome CDP 连接已中断.*Runtime\.evaluate",
+        ):
+            session.send("Runtime.evaluate", {"expression": "1 + 1"})
+
     def test_default_cdp_profile_is_persistent_and_not_default_or_tmp(self):
         module = load_module()
 
@@ -1138,6 +1156,29 @@ class ChromeSetupTests(unittest.TestCase):
         # 风控在第一页就终止，不应继续滚动翻页
         self.assertEqual(module._request_counter, 1)
 
+    def test_scrape_list_cleanup_does_not_mask_cdp_disconnect(self):
+        module = load_module()
+
+        class DisconnectingCDP(FakeCaptureCDP):
+            def send(self, method, params=None, sid=None):
+                if method == "Page.navigate":
+                    raise module.CDPConnectionError("原始 CDP 连接断开")
+                if method == "Target.closeTarget":
+                    raise BrokenPipeError(32, "Broken pipe during cleanup")
+                return super().send(method, params, sid)
+
+            def close(self):
+                raise BrokenPipeError(32, "Broken pipe during close")
+
+        cdp = DisconnectingCDP()
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = str(pathlib.Path(tmp) / "jobs.json")
+            with self.assertRaisesRegex(
+                module.CDPConnectionError,
+                "原始 CDP 连接断开",
+            ):
+                self._run_scrape_list(module, cdp, output_path, pages=1)
+
     def test_wait_for_login_rotates_targets_and_backs_off(self):
         module = load_module()
         cdp = mock.Mock()
@@ -1403,6 +1444,33 @@ class ChromeSetupTests(unittest.TestCase):
                 self.assertTrue((workdir / "boss_details.json").exists())
             finally:
                 os.chdir(cwd)
+
+    def test_scrape_details_skips_records_loaded_from_checkpoint(self):
+        module = load_module()
+        job = {
+            "job_id": "job-1",
+            "title": "Python工程师",
+            "boss_name": "示例公司",
+            "job_link": "https://www.zhipin.com/job_detail/job-1.html",
+        }
+        completed = {
+            "job_id": "job-1",
+            "title": "Python工程师",
+            "company": "示例公司",
+            "job_link": job["job_link"],
+            "jd": "已完成的岗位详情",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                mock.patch.object(module, "CDPSession") as cdp:
+            output = pathlib.Path(temp_dir) / "jobs.json"
+            results = module.scrape_details(
+                {"jobs": [job]},
+                output_path=str(output),
+                initial_results=[completed],
+            )
+
+        self.assertEqual(results, [completed])
+        cdp.assert_not_called()
 
     def test_scrape_details_stops_before_writing_login_truncation(self):
         module = load_module()

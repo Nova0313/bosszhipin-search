@@ -160,6 +160,11 @@ class HtmlContentTests(unittest.TestCase):
         self.assertIn("/api/switch-account", self.html)
         self.assertIn("不会影响你的主 Chrome", self.html)
 
+    def test_interrupted_task_resume_entry_is_present(self):
+        self.assertIn('id="resume-button"', self.html)
+        self.assertIn("/api/resume", self.html)
+        self.assertIn("继续中断任务", self.html)
+
 
 class ProgressTests(unittest.TestCase):
     def setUp(self):
@@ -192,6 +197,19 @@ class ProgressTests(unittest.TestCase):
         module.update_progress_from_line(self.task, "结果 CSV 已保存: /tmp/jobs.csv")
         self.assertEqual(self.task.phase, "正在完成输出")
         self.assertEqual(self.task.progress, 97)
+
+    def test_loaded_checkpoint_updates_resume_phase(self):
+        module.update_progress_from_line(
+            self.task,
+            "已加载检查点: 候选岗位 30 条，列表组合 2/5，发布时间 0/30",
+        )
+        self.assertEqual(self.task.phase, "从断点继续列表检索 2/5")
+        self.assertGreater(self.task.progress, 20)
+
+    def test_loaded_detail_checkpoint_updates_resume_phase(self):
+        module.update_progress_from_line(self.task, "已加载详情检查点: 8/20")
+        self.assertEqual(self.task.phase, "从断点继续抓取详情 8/20")
+        self.assertTrue(self.task.detail_started)
 
 
 class ManagerTests(unittest.TestCase):
@@ -244,6 +262,38 @@ class ManagerTests(unittest.TestCase):
             login_url = manager.switch_account()
         self.assertEqual(login_url, "https://login.zhipin.com/")
         switch.assert_called_once_with()
+
+    def test_failed_task_can_resume_with_same_command_and_result_directory(self):
+        manager = module.ScrapeTaskManager()
+        previous = module.ScrapeTask(
+            "failed-id",
+            "keyword",
+            "/tmp/rules.csv",
+            "/tmp/result/task-1",
+            ["python", "-m", "scripts.batch_search", "--result-dir", "/tmp/result/task-1"],
+            csv_path="/tmp/result/task-1/jobs.csv",
+            json_path="/tmp/result/task-1/jobs.json",
+            state="failed",
+        )
+        manager._tasks[previous.job_id] = previous
+
+        with mock.patch.object(module.threading, "Thread") as thread:
+            resumed = manager.resume(previous.job_id)
+
+        self.assertNotEqual(resumed.job_id, previous.job_id)
+        self.assertEqual(resumed.command, previous.command)
+        self.assertEqual(resumed.output_path, previous.output_path)
+        self.assertEqual(resumed.resumed_from, previous.job_id)
+        self.assertFalse(resumed.public_data()["can_resume"])
+        thread.return_value.start.assert_called_once_with()
+
+    def test_completed_task_cannot_resume(self):
+        manager = module.ScrapeTaskManager()
+        manager._tasks["done"] = module.ScrapeTask(
+            "done", "keyword", "rules.csv", "result", [], state="completed",
+        )
+        with self.assertRaisesRegex(module.WebRequestError, "只能继续"):
+            manager.resume("done")
 
 
 class PackagingTests(unittest.TestCase):

@@ -804,6 +804,20 @@ def write_final_json(json_path: str, records: list[dict], fields: list[str] | No
     print(f"结果 JSON 已保存: {json_path}")
 
 
+def load_partial_detail_records(path: str) -> list[dict]:
+    """Load incrementally saved JD records from an interrupted result folder."""
+    detail_path = Path(path)
+    if not detail_path.is_file():
+        return []
+    try:
+        payload = json.loads(detail_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [dict(item) for item in payload if isinstance(item, dict)]
+
+
 def _experience_from_record(record: dict) -> str:
     if record.get("experience"):
         return str(record["experience"])
@@ -1141,6 +1155,12 @@ def main(argv=None) -> int:
     }
     records = []
     if jobs and args.fetch_jd:
+        partial_details = load_partial_detail_records(json_path)
+        if partial_details:
+            print(
+                f"已发现中断的 JD 详情: {len(partial_details)} 条，"
+                "将跳过已完成岗位"
+            )
         try:
             details = boss.scrape_details(
                 list_data,
@@ -1149,6 +1169,7 @@ def main(argv=None) -> int:
                 cdp_port=args.cdp_port,
                 fmt="json",
                 request_interval=args.interval,
+                initial_results=partial_details,
             )
         except RuntimeError as exc:
             print(f"❌ 详情抓取中止: {exc}")

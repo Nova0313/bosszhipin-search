@@ -385,6 +385,7 @@
         <div class="actions">
           <button id="start-button" class="primary" type="submit">开始检索</button>
           <button id="cancel-button" class="secondary" type="button" disabled>停止</button>
+          <button id="resume-button" class="secondary" type="button" hidden>继续中断任务</button>
         </div>
         <button class="info-button" type="button" aria-expanded="false"
           aria-controls="safety-rules" data-disclosure-target="safety-rules">安全保护条例</button>
@@ -439,6 +440,7 @@
     const companyMatchField = document.querySelector('#company-match-field');
     const startButton = document.querySelector('#start-button');
     const cancelButton = document.querySelector('#cancel-button');
+    const resumeButton = document.querySelector('#resume-button');
     const switchAccountButton = document.querySelector('#switch-account-button');
     const statePill = document.querySelector('#state-pill');
     const phase = document.querySelector('#phase');
@@ -471,6 +473,7 @@
     function setRunning(running) {
       startButton.disabled = running;
       cancelButton.disabled = !running;
+      resumeButton.disabled = running;
       switchAccountButton.disabled = running;
       form.querySelectorAll('input, select').forEach(element => {
         element.disabled = running;
@@ -512,13 +515,15 @@
       logOffset = data.next_offset || logOffset;
 
       const terminal = ['completed', 'failed', 'cancelled'].includes(data.state);
+      resumeButton.hidden = !(terminal && data.can_resume);
       if (terminal) {
         clearTimeout(pollTimer);
         setRunning(false);
         if (data.state === 'completed') {
           showMessage(`检索完成。结果目录：${data.output_path}\nCSV：${data.csv_path}\nJSON：${data.json_path}`);
         } else {
-          showMessage(data.error || data.phase || '任务未完成', true);
+          const detail = data.error || data.phase || '任务未完成';
+          showMessage(data.can_resume ? `${detail}\n可点击“继续中断任务”从已保存的检查点继续。` : detail, true);
         }
       }
       return terminal;
@@ -577,6 +582,7 @@
       logOffset = 0;
       setProgress(0);
       setRunning(true);
+      resumeButton.hidden = true;
       statePill.textContent = '启动中';
       statePill.className = 'state-pill running';
       phase.textContent = '校验检索规则';
@@ -628,6 +634,38 @@
         renderStatus(data);
       } catch (error) {
         showMessage(error.message, true);
+      }
+    });
+
+    resumeButton.addEventListener('click', async () => {
+      if (!activeJobId) return;
+      clearTimeout(pollTimer);
+      resumeButton.hidden = true;
+      resultBox.style.display = 'none';
+      log.innerHTML = '<span class="empty-log">正在加载检查点…</span>';
+      logOffset = 0;
+      setRunning(true);
+      statePill.textContent = '恢复中';
+      statePill.className = 'state-pill running';
+      phase.textContent = '准备从断点继续';
+      try {
+        const response = await fetch('/api/resume', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: activeJobId })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '无法继续任务');
+        activeJobId = data.job_id;
+        renderStatus(data);
+        pollTimer = setTimeout(pollStatus, 300);
+      } catch (error) {
+        statePill.textContent = '恢复失败';
+        statePill.className = 'state-pill failed';
+        phase.textContent = '无法继续任务';
+        showMessage(error.message, true);
+        setRunning(false);
+        resumeButton.hidden = false;
       }
     });
 

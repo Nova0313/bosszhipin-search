@@ -213,6 +213,17 @@ class TableReadingTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_partial_detail_records_are_loaded_for_resume(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "jobs.json"
+            path.write_text(
+                json.dumps([{"job_id": "done", "jd": "已完成"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            records = module.load_partial_detail_records(str(path))
+
+        self.assertEqual(records, [{"job_id": "done", "jd": "已完成"}])
+
     def test_pages_default_means_all_pages(self):
         args = module.build_arg_parser().parse_args(["rules.csv"])
         self.assertIsNone(args.pages)
