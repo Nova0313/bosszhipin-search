@@ -105,7 +105,7 @@
       background: var(--accent-soft);
       box-shadow: inset 0 0 0 1px var(--accent);
     }
-    input[type="text"], input[type="number"], input[type="date"], select {
+    input[type="text"], input[type="number"], input[type="date"], select, textarea {
       width: 100%;
       height: 46px;
       border: 1px solid var(--line);
@@ -118,7 +118,8 @@
       outline: none;
       transition: border-color .18s, box-shadow .18s;
     }
-    input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(111,75,242,.12); }
+    textarea { min-height: 112px; height: auto; padding: 12px 13px; resize: vertical; line-height: 1.55; }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(111,75,242,.12); }
     .hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
     .path-tools { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
     .text-button {
@@ -269,7 +270,7 @@
       </div>
       <div class="header-actions">
         <button id="switch-account-button" class="account-button" type="button">切换账号</button>
-        <div class="pure-badge">纯 Python · 无大模型</div>
+        <div class="pure-badge">BOSS 抓取 · LLM 语义理解</div>
       </div>
     </header>
 
@@ -311,9 +312,22 @@
         <details>
           <summary>高级选项</summary>
           <div class="field">
+            <label class="check-option" for="llm-filter-enabled">
+              <input id="llm-filter-enabled" type="checkbox" checked
+                aria-controls="job-requirements-field" aria-expanded="true">
+              LLM 筛选岗位相关性
+            </label>
+          </div>
+          <div class="field" id="job-requirements-field">
+            <label for="job-requirements">岗位需求</label>
+            <textarea id="job-requirements" maxlength="10000"
+              placeholder="例如：我们寻找做机器人视觉、VLA 或多模态算法的团队，排除纯销售和测试岗。">我们寻找和AI相关或对AI算力有潜在需求的岗位</textarea>
+            <p class="hint">原检索流程保持不变：先执行本地标题模糊匹配和连续 5 个未匹配停搜，再按下方开关决定是否抓取 JD。检索完成后，将最终岗位表和需求发给 LLM 做语义相关性判断。后续公司聚合、工商信息抓取、去重和 CSV 输出均由代码完成。硅基流动需在启动 Web 前配置 LLM_PROVIDER、SILICONFLOW_API_KEY 和 SILICONFLOW_MODEL。</p>
+          </div>
+          <div class="field">
             <label for="output-path">输出根目录（可选）</label>
             <input id="output-path" type="text" placeholder="留空则保存到项目 result/">
-            <p class="hint">每次任务会在该路径下新建独立文件夹，内含 jobs.csv、jobs.json 和 metadata.json</p>
+            <p class="hint">每次任务会在该路径下新建独立文件夹；启用 LLM 时还会生成 companies.csv</p>
           </div>
           <div class="field two-col">
             <div>
@@ -323,33 +337,47 @@
             </div>
             <div>
               <label for="interval">抓取时间间隔（秒）</label>
-              <input id="interval" type="number" min="0" max="600" step="0.5" value="10">
+              <input id="interval" type="number" min="0" max="600" step="0.5" value="3">
             </div>
           </div>
+          <div class="field" id="keyword-match-threshold-field">
+            <label for="keyword-match-threshold">岗位关键词模糊匹配阈值</label>
+            <input id="keyword-match-threshold" type="number" min="0" max="1" step="0.01" value="0.8" required>
+            <p class="hint">仅关键词模式生效。无论是否填写岗位需求，该标题匹配逻辑都会在 LLM 语义判断前执行。</p>
+          </div>
           <div class="field">
+            <label class="check-option" for="fetch-publish-time">
+              <input id="fetch-publish-time" type="checkbox"
+                aria-controls="publish-date-range-field" aria-expanded="false">
+              查询岗位发布时间
+            </label>
+            <p class="hint">开启后可配置发布时间区间，并会逐个访问岗位详情页补查发布/更新时间。</p>
+          </div>
+          <div class="field" id="publish-date-range-field" hidden>
             <div class="label">岗位发布时间区间（可选）</div>
             <div class="two-col">
               <div>
                 <label for="published-from">起始日期</label>
-                <input id="published-from" type="date">
+                <input id="published-from" type="date" disabled>
               </div>
               <div>
                 <label for="published-to">结束日期</label>
-                <input id="published-to" type="date">
+                <input id="published-to" type="date" disabled>
               </div>
             </div>
-            <p class="hint">起止日期均包含当天。启用后会读取岗位详情页中的发布时间/更新时间；无法识别时间的岗位会被排除，并计入任务日志。</p>
+            <p class="hint">起止日期均包含当天。无法识别时间的岗位会被排除，并计入任务日志。</p>
           </div>
           <div class="field">
             <label class="check-option" for="fetch-jd">
-              <input id="fetch-jd" type="checkbox" checked>
+              <input id="fetch-jd" type="checkbox"
+                aria-controls="max-details-field" aria-expanded="false">
               抓取岗位 JD 详情
             </label>
             <p class="hint">关闭后只抓职位列表，速度更快；JD 字段将不输出</p>
           </div>
-          <div class="field" id="max-details-field">
+          <div class="field" id="max-details-field" hidden>
             <label for="max-details">JD 详情数量上限</label>
-            <input id="max-details" type="number" min="1" placeholder="默认抓取全部命中岗位">
+            <input id="max-details" type="number" min="1" disabled placeholder="默认抓取全部命中岗位">
             <p class="hint">只限制抓取 JD 的岗位数；最终 CSV/JSON 仍保留全部命中岗位，其余岗位的 JD 为空</p>
           </div>
           <div class="field" id="company-match-field" hidden>
@@ -365,19 +393,20 @@
             <div class="check-grid" id="output-fields">
               <label class="check-option"><input type="checkbox" value="job_id" checked>Job ID</label>
               <label class="check-option"><input type="checkbox" value="title" checked>职位名称</label>
-              <label class="check-option"><input type="checkbox" value="company" checked>公司</label>
-              <label class="check-option"><input type="checkbox" value="location" checked>地点</label>
+              <label class="check-option"><input type="checkbox" value="company">公司</label>
+              <label class="check-option"><input type="checkbox" value="location" checked>公司地点</label>
               <label class="check-option"><input type="checkbox" value="salary" checked>薪资</label>
               <label class="check-option"><input type="checkbox" value="experience" checked>工作经验</label>
-              <label class="check-option"><input type="checkbox" value="publish_date" checked>发布时间</label>
-              <label class="check-option"><input type="checkbox" value="jd" data-jd-field checked>JD 内容</label>
+              <label class="check-option"><input type="checkbox" value="publish_date">发布时间</label>
+              <label class="check-option"><input type="checkbox" value="jd" data-jd-field>JD 内容</label>
               <label class="check-option"><input type="checkbox" value="job_link">职位链接</label>
               <label class="check-option"><input type="checkbox" value="boss_active_status">招聘者活跃状态</label>
-              <label class="check-option"><input type="checkbox" value="company_scale">公司规模</label>
-              <label class="check-option"><input type="checkbox" value="company_stage">融资阶段</label>
-              <label class="check-option"><input type="checkbox" value="company_industry">公司行业</label>
+              <label class="check-option"><input type="checkbox" value="company_scale" checked>公司规模</label>
+              <label class="check-option"><input type="checkbox" value="company_stage" checked>融资阶段</label>
+              <label class="check-option"><input type="checkbox" value="company_industry" checked>公司行业</label>
               <label class="check-option"><input type="checkbox" value="skills">技能标签</label>
               <label class="check-option"><input type="checkbox" value="welfare">福利</label>
+              <label class="check-option"><input type="checkbox" value="llm_match_reason">LLM 语义判断理由</label>
             </div>
           </div>
         </details>
@@ -393,7 +422,7 @@
           <ul>
             <li>搜索组合默认最多 64 个，避免规则笛卡尔积突然膨胀</li>
             <li>“抓取所有页”会在无更多数据、空页或没有新增岗位时自动停止，防止死循环</li>
-            <li>列表翻页、JD 详情请求和组合切换默认都等待 10 秒</li>
+            <li>列表翻页、发布时间和 JD 详情请求默认等待 3 秒；组合切换固定等待 10 秒</li>
             <li>启用发布时间区间后，需要逐个读取岗位详情页，会增加请求次数；没有可靠时间信息的岗位不会猜测日期</li>
             <li>同一时间只允许运行一个 Web 检索任务，避免多个任务并发冲击网站</li>
             <li>检测到未登录、验证码、访问频繁或环境异常时会停止，不会持续重试</li>
@@ -426,11 +455,18 @@
   <script>
     const form = document.querySelector('#search-form');
     const tablePath = document.querySelector('#table-path');
+    const llmFilterEnabled = document.querySelector('#llm-filter-enabled');
+    const jobRequirements = document.querySelector('#job-requirements');
+    const jobRequirementsField = document.querySelector('#job-requirements-field');
     const outputPath = document.querySelector('#output-path');
     const pages = document.querySelector('#pages');
     const interval = document.querySelector('#interval');
+    const keywordMatchThreshold = document.querySelector('#keyword-match-threshold');
+    const keywordMatchThresholdField = document.querySelector('#keyword-match-threshold-field');
     const publishedFrom = document.querySelector('#published-from');
     const publishedTo = document.querySelector('#published-to');
+    const fetchPublishTime = document.querySelector('#fetch-publish-time');
+    const publishDateRangeField = document.querySelector('#publish-date-range-field');
     const fetchJd = document.querySelector('#fetch-jd');
     const maxDetails = document.querySelector('#max-details');
     const maxDetailsField = document.querySelector('#max-details-field');
@@ -475,16 +511,39 @@
       cancelButton.disabled = !running;
       resumeButton.disabled = running;
       switchAccountButton.disabled = running;
-      form.querySelectorAll('input, select').forEach(element => {
+      form.querySelectorAll('input, select, textarea').forEach(element => {
         element.disabled = running;
       });
-      if (!running) syncJdControls();
+      if (!running) {
+        syncLlmControls();
+        syncPublishTimeControls();
+        syncJdControls();
+      }
+    }
+
+    function syncLlmControls() {
+      const enabled = llmFilterEnabled.checked;
+      jobRequirementsField.hidden = !enabled;
+      jobRequirements.disabled = !enabled;
+      llmFilterEnabled.setAttribute('aria-expanded', String(enabled));
+      if (enabled && !jobRequirements.value.trim()) {
+        jobRequirements.value = '我们寻找和AI相关或对AI算力有潜在需求的岗位';
+      }
+    }
+
+    function syncPublishTimeControls() {
+      const enabled = fetchPublishTime.checked;
+      publishDateRangeField.hidden = !enabled;
+      publishedFrom.disabled = !enabled;
+      publishedTo.disabled = !enabled;
+      fetchPublishTime.setAttribute('aria-expanded', String(enabled));
     }
 
     function syncJdControls() {
       const enabled = fetchJd.checked;
+      maxDetailsField.hidden = !enabled;
       maxDetails.disabled = !enabled;
-      maxDetailsField.style.opacity = enabled ? '1' : '.55';
+      fetchJd.setAttribute('aria-expanded', String(enabled));
       jdOutputField.disabled = !enabled;
       if (!enabled) jdOutputField.checked = false;
     }
@@ -520,7 +579,9 @@
         clearTimeout(pollTimer);
         setRunning(false);
         if (data.state === 'completed') {
-          showMessage(`检索完成。结果目录：${data.output_path}\nCSV：${data.csv_path}\nJSON：${data.json_path}`);
+          const companyOutput = data.companies_csv_path
+            ? `\n公司 CSV：${data.companies_csv_path}` : '';
+          showMessage(`检索完成。结果目录：${data.output_path}\n岗位 CSV：${data.csv_path}\nJSON：${data.json_path}${companyOutput}`);
         } else {
           const detail = data.error || data.phase || '任务未完成';
           showMessage(data.can_resume ? `${detail}\n可点击“继续中断任务”从已保存的检查点继续。` : detail, true);
@@ -548,13 +609,18 @@
       input.addEventListener('change', () => {
         const isCompany = selectedMode() === 'company';
         companyMatchField.hidden = !isCompany;
+        keywordMatchThresholdField.hidden = isCompany;
         tablePath.placeholder = isCompany
           ? '/绝对路径/company_rules.csv'
           : '/绝对路径/keyword_rules.csv';
       });
     });
 
+    llmFilterEnabled.addEventListener('change', syncLlmControls);
+    fetchPublishTime.addEventListener('change', syncPublishTimeControls);
     fetchJd.addEventListener('change', syncJdControls);
+    syncLlmControls();
+    syncPublishTimeControls();
     syncJdControls();
 
     document.querySelectorAll('[data-example]').forEach(button => {
@@ -590,11 +656,15 @@
       const payload = {
         mode: selectedMode(),
         table_path: tablePath.value,
+        llm_filter_enabled: llmFilterEnabled.checked,
+        job_requirements: llmFilterEnabled.checked ? jobRequirements.value : '',
         output_path: outputPath.value,
         pages: pages.value,
         interval: interval.value,
-        published_from: publishedFrom.value,
-        published_to: publishedTo.value,
+        keyword_match_threshold: keywordMatchThreshold.value,
+        published_from: fetchPublishTime.checked ? publishedFrom.value : '',
+        published_to: fetchPublishTime.checked ? publishedTo.value : '',
+        fetch_publish_time: fetchPublishTime.checked,
         fetch_jd: fetchJd.checked,
         output_fields: selectedOutputFields(),
         max_details: maxDetails.value,

@@ -730,7 +730,7 @@ def map_api_jobs(data):
 
 
 CONSECUTIVE_JOB_MISMATCH_LIMIT = 5
-KEYWORD_FUZZY_MATCH_THRESHOLD = 0.3
+KEYWORD_FUZZY_MATCH_THRESHOLD = 0.8
 
 
 def normalize_keyword_match_text(value):
@@ -762,7 +762,11 @@ def fuzzy_text_contains(needle, haystack, threshold=KEYWORD_FUZZY_MATCH_THRESHOL
     return False
 
 
-def job_title_matches_keyword(keyword, job):
+def job_title_matches_keyword(
+    keyword,
+    job,
+    threshold=KEYWORD_FUZZY_MATCH_THRESHOLD,
+):
     """Fuzzy-match every whitespace-delimited keyword term against the job title."""
     keyword_text = unicodedata.normalize("NFKC", str(keyword or "")).casefold().strip()
     keyword_terms = [
@@ -772,7 +776,7 @@ def job_title_matches_keyword(keyword, job):
     ]
     normalized_title = normalize_keyword_match_text((job or {}).get("title"))
     return bool(keyword_terms) and all(
-        fuzzy_text_contains(term, normalized_title)
+        fuzzy_text_contains(term, normalized_title, threshold=threshold)
         for term in keyword_terms
     )
 
@@ -959,6 +963,48 @@ EXTRACT_PUBLISH_TIME_JS = r"""
     });
 })()
 """
+
+
+EXTRACT_COMPANY_REGISTRATION_JS = r"""
+(function(){
+    return JSON.stringify({
+        page_text: (document.body ? document.body.innerText : '').substring(0, 60000),
+        url: location.href
+    });
+})()
+"""
+
+COMPANY_FULL_NAME_LABELS = ("企业名称", "公司全称", "企业全称")
+COMPANY_CREDIT_CODE_LABELS = ("统一社会信用代码", "社会信用代码")
+UNIFIED_SOCIAL_CREDIT_CODE_RE = re.compile(r"(?<![0-9A-Z])[0-9A-Z]{18}(?![0-9A-Z])")
+
+
+def _labelled_company_value(page_text, labels):
+    """Extract a value next to a business-information label."""
+    lines = [re.sub(r"\s+", " ", line).strip() for line in str(page_text or "").splitlines()]
+    lines = [line for line in lines if line]
+    for index, line in enumerate(lines):
+        for label in labels:
+            match = re.match(rf"^{re.escape(label)}\s*[:：]?\s*(.*)$", line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if value:
+                return value
+            if index + 1 < len(lines):
+                return lines[index + 1]
+    return ""
+
+
+def extract_company_registration_info(page_text):
+    """Return legal name and unified social credit code from a company page."""
+    full_name = _labelled_company_value(page_text, COMPANY_FULL_NAME_LABELS)
+    raw_code = _labelled_company_value(page_text, COMPANY_CREDIT_CODE_LABELS).upper()
+    code_match = UNIFIED_SOCIAL_CREDIT_CODE_RE.search(raw_code)
+    return {
+        "company_full_name": full_name,
+        "unified_social_credit_code": code_match.group(0) if code_match else "",
+    }
 
 
 def _subtract_calendar_months(value: date, months: int) -> date:
@@ -2294,6 +2340,81 @@ def scrape_publish_times(
                 print(f"  等待 {gap:.1f}s 后读取下一个...\n")
                 time.sleep(gap)
     return jobs
+
+
+def scrape_company_registrations(
+    companies,
+    cdp_port=DEFAULT_CDP_PORT,
+    request_interval=None,
+):
+    """Visit BOSS company pages and extract labelled registration details."""
+    companies = [dict(company) for company in companies]
+    print(f"\n=== 抓取公司工商信息 ({len(companies)} 家) ===\n")
+    results = []
+    for index, company in enumerate(companies, 1):
+        source_name = str(company.get("source_company_name") or "").strip()
+        company_link = str(company.get("company_link") or "").strip()
+        print(f"[公司 {index}/{len(companies)}] {source_name or company_link}")
+        registration = {
+            **company,
+            "company_full_name": "",
+            "unified_social_credit_code": "",
+        }
+        if not company_link:
+            print("  缺少 BOSS 公司页链接，公司全称和信用代码留空")
+            results.append(registration)
+            continue
+
+        ws = None
+        target_id = None
+        try:
+            incr_request()
+            ws = CDPSession(cdp_port)
+            target_id, session_id = create_page_session(ws)
+            ws.send("Page.navigate", {"url": company_link}, session_id)
+            time.sleep(random.uniform(3, 6))
+            value = ws.eval_js(EXTRACT_COMPANY_REGISTRATION_JS, session_id)
+            try:
+                extracted = json.loads(value) if isinstance(value, str) else {}
+            except (json.JSONDecodeError, ValueError, TypeError):
+                extracted = {}
+            registration.update(
+                extract_company_registration_info(extracted.get("page_text", ""))
+            )
+            if registration["company_full_name"]:
+                print(f"  企业名称: {registration['company_full_name']}")
+            else:
+                print("  页面未找到标注的企业名称")
+            if registration["unified_social_credit_code"]:
+                print(
+                    "  统一社会信用代码: "
+                    f"{registration['unified_social_credit_code']}"
+                )
+            else:
+                print("  页面未找到统一社会信用代码")
+            results.append(registration)
+        finally:
+            if ws is not None and target_id is not None:
+                try:
+                    ws.send("Target.closeTarget", {"targetId": target_id})
+                except Exception:
+                    pass
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+        if index < len(companies):
+            gap = (
+                float(request_interval)
+                if request_interval is not None
+                else random.uniform(10, 25)
+            )
+            if gap > 0:
+                print(f"  等待 {gap:.1f}s 后抓取下一家...\n")
+                time.sleep(gap)
+    return results
 
 
 def scrape_details(list_data, max_details=None, output_path=None,

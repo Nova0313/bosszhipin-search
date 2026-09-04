@@ -372,6 +372,35 @@ class ExecutionTests(unittest.TestCase):
         self.assertFalse(module.company_name_matches("腾讯", "腾讯云科技", strategy="exact"))
         self.assertFalse(module.company_name_matches("腾讯", "阿里巴巴"))
 
+    def test_keyword_match_threshold_changes_fuzzy_job_filtering(self):
+        combination = module.SearchCombination(
+            "机器认", "上海", "101020100", "406", "105",
+        )
+        job = {"job_id": "one", "title": "机器人工程师"}
+
+        self.assertTrue(module.job_matches_combination(
+            combination, job, keyword_match_threshold=0.66,
+        ))
+        self.assertFalse(module.job_matches_combination(
+            combination, job, keyword_match_threshold=0.9,
+        ))
+
+    def test_keyword_match_threshold_is_part_of_checkpoint_fingerprint(self):
+        combinations = [
+            module.SearchCombination("Python", "上海", "101020100", "406", "105"),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "rules.csv"
+            table.write_text("rules", encoding="utf-8")
+            low = module.search_checkpoint_fingerprint(
+                str(table), combinations, 1, "contains", False, 0.66,
+            )
+            high = module.search_checkpoint_fingerprint(
+                str(table), combinations, 1, "contains", False, 0.9,
+            )
+
+        self.assertNotEqual(low, high)
+
     def test_dry_run_does_not_require_runtime_dependencies_or_chrome(self):
         rows = [
             ["搜索关键词", "城市", "薪资待遇", "工作经验"],
@@ -392,7 +421,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn('"across_columns": "AND"', output.getvalue())
         self.assertIn('"row_alignment": "NONE"', output.getvalue())
 
-    def test_main_scrapes_details_and_writes_default_csv_and_json_in_task_folder(self):
+    def test_main_skips_details_and_writes_default_csv_and_json_in_task_folder(self):
         rows = [
             ["搜索关键词", "城市", "薪资待遇", "工作经验"],
             ["Python", "上海", "20-50K", "3-5年"],
@@ -403,33 +432,34 @@ class ExecutionTests(unittest.TestCase):
             write_csv(table_path, rows)
             jobs = [{
                 "job_id": "abc", "title": "Python工程师", "boss_name": "示例公司",
-                "location": "上海", "job_link": "https://example/abc",
-            }]
-            details = [{
-                "job_id": "abc", "title": "Python工程师", "company": "示例公司",
                 "location": "上海", "salary": "20-40K", "experience": "3-5年",
-                "publish_date": "2026-08-31", "jd": "负责后端开发",
+                "company_scale": "100-499人", "company_stage": "B轮",
+                "company_industry": "互联网", "job_link": "https://example/abc",
             }]
             with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
                     mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
                     mock.patch.object(module, "execute_plan", return_value=(jobs, [])), \
-                    mock.patch.object(module.boss, "scrape_details", return_value=details) as scrape_details, \
+                    mock.patch.object(module.boss, "scrape_details") as scrape_details, \
                     contextlib.redirect_stdout(io.StringIO()):
                 code = module.main([str(table_path), "--output-dir", str(output_root)])
 
             self.assertEqual(code, 0)
-            scrape_details.assert_called_once()
-            self.assertEqual(scrape_details.call_args.kwargs["request_interval"], 10.0)
+            scrape_details.assert_not_called()
             result_dirs = list(output_root.iterdir())
             self.assertEqual(len(result_dirs), 1)
             result_dir = result_dirs[0]
             with open(result_dir / "jobs.csv", encoding="utf-8-sig", newline="") as handle:
                 exported = list(csv.DictReader(handle))
-            self.assertEqual(exported, details)
+            self.assertEqual(exported, [{
+                "job_id": "abc", "title": "Python工程师", "location": "上海",
+                "salary": "20-40K", "experience": "3-5年",
+                "company_scale": "100-499人", "company_stage": "B轮",
+                "company_industry": "互联网",
+            }])
             self.assertEqual(list(exported[0]), module.FINAL_CSV_COLUMNS)
             self.assertEqual(
                 json.loads((result_dir / "jobs.json").read_text(encoding="utf-8")),
-                details,
+                exported,
             )
             self.assertTrue((result_dir / "metadata.json").is_file())
 
@@ -514,6 +544,68 @@ class ExecutionTests(unittest.TestCase):
                 {"input": 2, "matched": 1, "unknown": 0, "outside": 1},
             )
 
+    def test_main_can_fetch_publish_time_without_date_filter(self):
+        rows = [
+            ["搜索关键词", "城市", "薪资待遇", "工作经验"],
+            ["Python", "上海", "20-50K", "3-5年"],
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table_path = pathlib.Path(temp_dir) / "rules.csv"
+            result_dir = pathlib.Path(temp_dir) / "one-task"
+            write_csv(table_path, rows)
+            jobs = [{
+                "job_id": "one", "title": "Python工程师", "boss_name": "公司A",
+            }]
+            enriched = [{**jobs[0], "publish_date": "2026-08-15"}]
+            with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
+                    mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
+                    mock.patch.object(module, "execute_plan", return_value=(jobs, [])), \
+                    mock.patch.object(module.boss, "scrape_publish_times", return_value=enriched) as scrape_times, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = module.main([
+                    str(table_path), "--result-dir", str(result_dir), "--no-detail",
+                    "--fetch-publish-time", "--output-fields", "job_id,publish_date",
+                    "--interval", "0",
+                ])
+
+            self.assertEqual(code, 0)
+            scrape_times.assert_called_once_with(
+                jobs,
+                cdp_port=9222,
+                request_interval=0.0,
+                start_index=0,
+                checkpoint_callback=mock.ANY,
+            )
+            exported = json.loads((result_dir / "jobs.json").read_text(encoding="utf-8"))
+            self.assertEqual(exported, [{"job_id": "one", "publish_date": "2026-08-15"}])
+
+    def test_main_can_disable_publish_time_lookup_with_date_filter(self):
+        rows = [
+            ["搜索关键词", "城市", "薪资待遇", "工作经验"],
+            ["Python", "上海", "20-50K", "3-5年"],
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table_path = pathlib.Path(temp_dir) / "rules.csv"
+            result_dir = pathlib.Path(temp_dir) / "one-task"
+            write_csv(table_path, rows)
+            jobs = [{
+                "job_id": "one", "title": "Python工程师", "boss_name": "公司A",
+                "publish_date": "2026-08-15",
+            }]
+            with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
+                    mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
+                    mock.patch.object(module, "execute_plan", return_value=(jobs, [])), \
+                    mock.patch.object(module.boss, "scrape_publish_times") as scrape_times, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = module.main([
+                    str(table_path), "--result-dir", str(result_dir), "--no-detail",
+                    "--no-fetch-publish-time", "--published-from", "2026-08-01",
+                    "--published-to", "2026-08-31", "--interval", "0",
+                ])
+
+            self.assertEqual(code, 0)
+            scrape_times.assert_not_called()
+
     def test_main_reuses_candidate_checkpoint_after_detail_failure(self):
         rows = [
             ["搜索关键词", "城市", "薪资待遇", "工作经验"],
@@ -533,6 +625,7 @@ class ExecutionTests(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()):
                 first_code = module.main([
                     str(table_path), "--result-dir", str(root / "task-1"),
+                    "--fetch-detail",
                 ])
 
             checkpoint_files = list((root / ".checkpoints").glob("*.json"))
@@ -616,10 +709,142 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(
             module.FINAL_CSV_COLUMNS,
             [
-                "job_id", "title", "company", "location", "salary", "experience",
-                "publish_date", "jd",
+                "job_id", "title", "location", "salary", "experience",
+                "company_scale", "company_stage", "company_industry",
             ],
         )
+
+    def test_relevant_jobs_are_aggregated_by_company(self):
+        jobs = [
+            {
+                "title": "VLA 算法", "company": "示例科技",
+                "encrypt_brand_id": "brand-1",
+                "company_link": "https://www.zhipin.com/gongsi/brand-1.html",
+            },
+            {
+                "title": "视觉算法", "company": "示例科技",
+                "encrypt_brand_id": "brand-1",
+                "company_link": "https://www.zhipin.com/gongsi/brand-1.html",
+            },
+        ]
+
+        companies = module.aggregate_relevant_companies(jobs)
+
+        self.assertEqual(len(companies), 1)
+        self.assertEqual(companies[0]["matched_job_count"], 2)
+        self.assertEqual(companies[0]["matched_job_titles"], ["VLA 算法", "视觉算法"])
+
+    def test_company_csv_contains_exact_requested_columns(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = pathlib.Path(temp_dir) / "companies.csv"
+            module.write_company_csv(str(output_path), [
+                {
+                    "company_full_name": "北京示例科技有限公司",
+                    "unified_social_credit_code": "91110108MA01234567",
+                    "source_company_name": "示例科技",
+                },
+                {
+                    "company_full_name": "",
+                    "unified_social_credit_code": "",
+                    "source_company_name": "未公开工商信息的品牌",
+                },
+            ])
+            with open(output_path, encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(list(rows[0]), module.COMPANY_CSV_COLUMNS)
+        self.assertEqual(rows, [{
+            "company_full_name": "北京示例科技有限公司",
+            "unified_social_credit_code": "91110108MA01234567",
+        }])
+
+    def test_company_registrations_are_deduplicated_by_credit_code(self):
+        companies = module.deduplicate_company_registrations([
+            {
+                "company_full_name": "示例科技有限公司",
+                "unified_social_credit_code": "91110108ma01234567",
+                "source_company_name": "品牌A",
+                "matched_job_count": 2,
+                "matched_job_titles": ["算法A"],
+            },
+            {
+                "company_full_name": "示例科技有限公司",
+                "unified_social_credit_code": "91110108MA01234567",
+                "source_company_name": "品牌B",
+                "matched_job_count": 1,
+                "matched_job_titles": ["算法B"],
+            },
+        ])
+
+        self.assertEqual(len(companies), 1)
+        self.assertEqual(companies[0]["unified_social_credit_code"], "91110108MA01234567")
+        self.assertEqual(companies[0]["matched_job_count"], 3)
+        self.assertEqual(companies[0]["matched_job_titles"], ["算法A", "算法B"])
+
+    def test_main_llm_filters_jobs_and_writes_aggregated_company_csv(self):
+        rows = [
+            ["搜索关键词", "城市", "薪资待遇", "工作经验"],
+            ["算法", "上海", "20-50K", "3-5年"],
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table_path = pathlib.Path(temp_dir) / "rules.csv"
+            result_dir = pathlib.Path(temp_dir) / "task"
+            write_csv(table_path, rows)
+            jobs = [
+                {
+                    "job_id": "keep", "title": "VLA 算法", "boss_name": "公司A",
+                    "company_link": "https://www.zhipin.com/gongsi/a.html",
+                    "encrypt_brand_id": "a",
+                },
+                {
+                    "job_id": "drop", "title": "销售", "boss_name": "公司B",
+                    "company_link": "https://www.zhipin.com/gongsi/b.html",
+                    "encrypt_brand_id": "b",
+                },
+            ]
+
+            def fake_filter(records, requirements, batch_size):
+                self.assertEqual(requirements, "需要 VLA 技术岗")
+                self.assertEqual(batch_size, 20)
+                return [{
+                    **records[0],
+                    "llm_match_reason": "VLA 匹配",
+                }]
+
+            registrations = [{
+                "company_full_name": "上海公司A科技有限公司",
+                "unified_social_credit_code": "91310101MA01234567",
+            }]
+            with mock.patch.object(module.boss, "resolve_city", side_effect=fake_city_resolver), \
+                    mock.patch.object(module.boss, "require_runtime_dependencies", return_value=True), \
+                    mock.patch.object(module, "execute_plan", return_value=(jobs, [])), \
+                    mock.patch.object(module.boss, "scrape_details") as scrape_details, \
+                    mock.patch.object(module.llm_filter, "validate_environment"), \
+                    mock.patch.object(module.llm_filter, "filter_relevant_jobs", side_effect=fake_filter), \
+                    mock.patch.object(
+                        module.boss, "scrape_company_registrations",
+                        return_value=registrations,
+                    ) as scrape_companies, contextlib.redirect_stdout(io.StringIO()):
+                code = module.main([
+                    str(table_path), "--result-dir", str(result_dir), "--no-detail",
+                    "--job-requirements", "需要 VLA 技术岗", "--interval", "0",
+                ])
+
+            self.assertEqual(code, 0)
+            scrape_details.assert_not_called()
+            scrape_companies.assert_called_once()
+            self.assertEqual(
+                [row["job_id"] for row in json.loads(
+                    (result_dir / "jobs.json").read_text(encoding="utf-8")
+                )],
+                ["keep"],
+            )
+            with open(result_dir / "companies.csv", encoding="utf-8-sig", newline="") as handle:
+                companies = list(csv.DictReader(handle))
+            self.assertEqual(companies, registrations)
+            metadata = json.loads((result_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["llm_filter"]["candidate_jobs"], 2)
+            self.assertEqual(metadata["llm_filter"]["relevant_jobs"], 1)
 
     def test_detail_limit_keeps_unfetched_jobs_with_blank_jd(self):
         jobs = [

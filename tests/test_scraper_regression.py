@@ -627,6 +627,61 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertIn("发布时间", module.EXTRACT_PUBLISH_TIME_JS)
         self.assertIn("return ''", module.EXTRACT_PUBLISH_TIME_JS)
 
+    def test_company_registration_fields_require_labelled_business_information(self):
+        module = load_module()
+        page_text = (
+            "公司工商信息\n"
+            "企业名称：北京示例科技有限公司\n"
+            "统一社会信用代码\n91110108MA01234567\n"
+            "法定代表人：张三"
+        )
+
+        result = module.extract_company_registration_info(page_text)
+
+        self.assertEqual(result["company_full_name"], "北京示例科技有限公司")
+        self.assertEqual(result["unified_social_credit_code"], "91110108MA01234567")
+
+    def test_company_brand_name_is_not_used_as_unlabelled_legal_name(self):
+        module = load_module()
+
+        result = module.extract_company_registration_info("示例品牌\n在招职位 20\n公司介绍")
+
+        self.assertEqual(result["company_full_name"], "")
+        self.assertEqual(result["unified_social_credit_code"], "")
+
+    def test_company_pages_use_configured_request_interval_and_close_sessions(self):
+        module = load_module()
+        first = mock.Mock()
+        first.eval_js.return_value = json.dumps({
+            "page_text": "企业名称：公司A有限公司\n统一社会信用代码：91110108MA01234567",
+        })
+        second = mock.Mock()
+        second.eval_js.return_value = json.dumps({
+            "page_text": "企业名称：公司B有限公司\n统一社会信用代码：91310101MA01234567",
+        })
+        companies = [
+            {"source_company_name": "A", "company_link": "https://example/a"},
+            {"source_company_name": "B", "company_link": "https://example/b"},
+        ]
+
+        with mock.patch.object(module, "CDPSession", side_effect=[first, second]), \
+                mock.patch.object(module, "create_page_session", return_value=("target", "session")), \
+                mock.patch.object(module, "incr_request") as increment, \
+                mock.patch.object(module.random, "uniform", return_value=0), \
+                mock.patch.object(module.time, "sleep") as sleep, \
+                redirect_stdout(io.StringIO()):
+            results = module.scrape_company_registrations(
+                companies, request_interval=10,
+            )
+
+        self.assertEqual([row["company_full_name"] for row in results], [
+            "公司A有限公司", "公司B有限公司",
+        ])
+        self.assertEqual(increment.call_count, 2)
+        self.assertIn(mock.call(10.0), sleep.call_args_list)
+        first.close.assert_called_once()
+        second.close.assert_called_once()
+
     def test_publish_time_read_reconnects_after_connection_reset(self):
         module = load_module()
         module.websocket = mock.Mock(WebSocketException=ConnectionResetError)
@@ -2028,12 +2083,12 @@ class VersionConsistencyTests(unittest.TestCase):
 
 
 class ProjectScopeTests(unittest.TestCase):
-    """项目边界守卫：只保留抓取和聚合分析，不内置简历匹配打分。"""
+    """项目边界守卫：LLM 只做岗位语义判断，不内置简历匹配打分。"""
 
     def _read_text(self, name):
         return (ROOT_PATH / name).read_text(encoding="utf-8")
 
-    def test_resume_matching_feature_is_not_packaged_or_documented(self):
+    def test_job_filter_is_packaged_without_resume_scoring_dependencies(self):
         self.assertFalse(
             (ROOT_PATH / "scripts" / "resume_score.py").exists(),
             "简历匹配打分脚本不应作为项目功能保留",
@@ -2043,20 +2098,15 @@ class ProjectScopeTests(unittest.TestCase):
             "删除简历匹配功能时也应删除对应测试",
         )
 
-        combined = "\n".join(
-            self._read_text(name)
-            for name in ("README.md", "pyproject.toml", "requirements.txt")
-        )
+        self.assertTrue((ROOT_PATH / "scripts" / "llm_filter.py").exists())
+        combined = self._read_text("requirements.txt")
         for forbidden in (
             "resume_score",
             "pdfplumber",
             "pypdf",
             "python-docx",
-            "openai",
             "langchain",
             "sentence-transformers",
-            "简历匹配打分",
-            "enable-llm",
         ):
             self.assertNotIn(forbidden, combined)
 

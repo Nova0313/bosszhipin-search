@@ -20,12 +20,20 @@ class RequestValidationTests(unittest.TestCase):
         self.assertEqual(options["pages"], 2)
         self.assertEqual(options["output_root"].name, "results")
         self.assertIsNone(options["max_details"])
-        self.assertEqual(options["interval"], 10)
-        self.assertTrue(options["fetch_jd"])
+        self.assertEqual(options["interval"], 3)
+        self.assertEqual(options["keyword_match_threshold"], 0.8)
+        self.assertFalse(options["fetch_jd"])
+        self.assertFalse(options["fetch_publish_time"])
+        self.assertTrue(options["llm_filter_enabled"])
+        self.assertEqual(
+            options["job_requirements"], module.DEFAULT_LLM_JOB_REQUIREMENTS,
+        )
         self.assertEqual(options["published_from"], "")
         self.assertEqual(options["published_to"], "")
-        self.assertIn("salary", options["output_fields"])
-        self.assertIn("experience", options["output_fields"])
+        self.assertEqual(options["output_fields"], [
+            "job_id", "title", "location", "salary", "experience",
+            "company_scale", "company_stage", "company_industry",
+        ])
 
     def test_missing_table_is_rejected(self):
         with self.assertRaisesRegex(module.WebRequestError, "表格文件不存在"):
@@ -61,8 +69,28 @@ class RequestValidationTests(unittest.TestCase):
         self.assertIn("/tmp/company rules.csv", command)
         self.assertNotIn("--max-details", command)
         self.assertIn("--interval", command)
+        self.assertIn("--keyword-match-threshold", command)
         self.assertIn("--output-fields", command)
         self.assertIn("--no-detail", command)
+        self.assertNotIn("--fetch-detail", command)
+        self.assertIn("--no-fetch-publish-time", command)
+
+    def test_build_command_explicitly_enables_jd_fetching(self):
+        options = {
+            "mode": "keyword",
+            "table_path": pathlib.Path("/tmp/rules.csv"),
+            "result_dir": pathlib.Path("/tmp/jobs"),
+            "pages": None,
+            "interval": 3,
+            "fetch_jd": True,
+            "fetch_publish_time": False,
+            "output_fields": ["job_id", "jd"],
+            "max_details": None,
+            "company_match": "contains",
+        }
+        command = module.build_command(options)
+        self.assertIn("--fetch-detail", command)
+        self.assertNotIn("--no-detail", command)
 
     def test_request_validates_interval_jd_and_output_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -81,6 +109,23 @@ class RequestValidationTests(unittest.TestCase):
         self.assertFalse(options["fetch_jd"])
         self.assertIsNone(options["max_details"])
         self.assertEqual(options["output_fields"], ["title", "salary", "experience"])
+
+    def test_keyword_match_threshold_is_validated(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "rules.csv"
+            table.write_text("搜索关键词,城市,薪资待遇,工作经验\nPython,上海,,\n", encoding="utf-8")
+            options = module.normalize_start_request({
+                "table_path": str(table),
+                "keyword_match_threshold": "0.82",
+            })
+            self.assertEqual(options["keyword_match_threshold"], 0.82)
+
+            for invalid in ("-0.01", "1.01", "NaN"):
+                with self.assertRaisesRegex(module.WebRequestError, "0-1"):
+                    module.normalize_start_request({
+                        "table_path": str(table),
+                        "keyword_match_threshold": invalid,
+                    })
 
     def test_manual_pages_has_no_ten_page_ceiling(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -121,6 +166,34 @@ class RequestValidationTests(unittest.TestCase):
         self.assertIn("--published-to", command)
         self.assertIn("2026-08-31", command)
 
+    def test_publish_time_lookup_choice_is_forwarded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "rules.csv"
+            table.write_text("搜索关键词,城市,薪资待遇,工作经验\nPython,上海,,\n", encoding="utf-8")
+            options = module.normalize_start_request({
+                "table_path": str(table),
+                "fetch_publish_time": True,
+            })
+
+        command = module.build_command({**options, "result_dir": pathlib.Path("/tmp/result")})
+        self.assertTrue(options["fetch_publish_time"])
+        self.assertIn("--fetch-publish-time", command)
+        self.assertNotIn("--no-fetch-publish-time", command)
+
+    def test_explicitly_disabled_publish_lookup_ignores_date_range(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "rules.csv"
+            table.write_text("搜索关键词,城市\nPython,上海\n", encoding="utf-8")
+            options = module.normalize_start_request({
+                "table_path": str(table),
+                "fetch_publish_time": False,
+                "published_from": "2026-08-01",
+                "published_to": "2026-08-31",
+            })
+
+        self.assertEqual(options["published_from"], "")
+        self.assertEqual(options["published_to"], "")
+
     def test_publish_date_range_rejects_reversed_dates(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             table = pathlib.Path(temp_dir) / "rules.csv"
@@ -131,6 +204,49 @@ class RequestValidationTests(unittest.TestCase):
                     "published_from": "2026-09-01",
                     "published_to": "2026-08-31",
                 })
+
+    def test_job_requirements_are_validated_and_forwarded_without_api_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "rules.csv"
+            table.write_text("搜索关键词,城市,薪资待遇,工作经验\nPython,上海,,\n", encoding="utf-8")
+            options = module.normalize_start_request({
+                "table_path": str(table),
+                "job_requirements": "  只要机器人视觉岗  ",
+            })
+
+        command = module.build_command({**options, "result_dir": pathlib.Path("/tmp/result")})
+        self.assertEqual(options["job_requirements"], "只要机器人视觉岗")
+        self.assertIn("--job-requirements", command)
+        self.assertIn("只要机器人视觉岗", command)
+        self.assertNotIn("OPENAI_API_KEY", command)
+
+    def test_job_requirements_length_is_limited(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "rules.csv"
+            table.write_text("搜索关键词,城市,薪资待遇,工作经验\nPython,上海,,\n", encoding="utf-8")
+            with self.assertRaisesRegex(module.WebRequestError, "10000"):
+                module.normalize_start_request({
+                    "table_path": str(table),
+                    "job_requirements": "x" * 10001,
+                })
+
+    def test_llm_toggle_supplies_default_requirement_and_disables_stale_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "rules.csv"
+            table.write_text("搜索关键词,城市\nPython,上海\n", encoding="utf-8")
+            enabled = module.normalize_start_request({
+                "table_path": str(table), "llm_filter_enabled": True,
+            })
+            disabled = module.normalize_start_request({
+                "table_path": str(table),
+                "llm_filter_enabled": False,
+                "job_requirements": "不应启用",
+            })
+
+        self.assertEqual(
+            enabled["job_requirements"], module.DEFAULT_LLM_JOB_REQUIREMENTS,
+        )
+        self.assertEqual(disabled["job_requirements"], "")
 
 
 class HtmlContentTests(unittest.TestCase):
@@ -151,9 +267,48 @@ class HtmlContentTests(unittest.TestCase):
         self.assertNotIn('id="pages" type="number" min="1" max="10"', self.html)
 
     def test_publish_date_controls_and_output_field_are_present(self):
-        self.assertIn('id="published-from" type="date"', self.html)
-        self.assertIn('id="published-to" type="date"', self.html)
-        self.assertIn('value="publish_date" checked', self.html)
+        self.assertIn('id="published-from" type="date" disabled', self.html)
+        self.assertIn('id="published-to" type="date" disabled', self.html)
+        self.assertIn('id="fetch-publish-time" type="checkbox"', self.html)
+        self.assertNotIn('value="publish_date" checked', self.html)
+        self.assertIn('id="publish-date-range-field" hidden', self.html)
+        self.assertIn("publishDateRangeField.hidden = !enabled", self.html)
+        self.assertIn("syncPublishTimeControls", self.html)
+
+    def test_keyword_match_threshold_control_is_present(self):
+        self.assertIn('id="keyword-match-threshold"', self.html)
+        self.assertIn('step="0.01" value="0.8"', self.html)
+        self.assertIn("keyword_match_threshold: keywordMatchThreshold.value", self.html)
+
+    def test_llm_requirement_and_company_output_controls_are_present(self):
+        self.assertIn('id="llm-filter-enabled" type="checkbox" checked', self.html)
+        self.assertIn('id="job-requirements"', self.html)
+        self.assertIn("job_requirements: llmFilterEnabled.checked ? jobRequirements.value : ''", self.html)
+        self.assertIn(module.DEFAULT_LLM_JOB_REQUIREMENTS, self.html)
+        self.assertIn("原检索流程保持不变", self.html)
+        self.assertIn("再按下方开关决定是否抓取 JD", self.html)
+        self.assertIn("companies.csv", self.html)
+        self.assertIn("companies_csv_path", self.html)
+        advanced_start = self.html.index("<details>")
+        advanced_end = self.html.index("</details>", advanced_start)
+        llm_toggle = self.html.index('id="llm-filter-enabled"')
+        self.assertLess(advanced_start, llm_toggle)
+        self.assertLess(llm_toggle, advanced_end)
+        self.assertIn("jobRequirementsField.hidden = !enabled", self.html)
+
+    def test_default_interval_jd_and_output_fields_are_present(self):
+        self.assertIn('id="interval" type="number" min="0" max="600" step="0.5" value="3"', self.html)
+        self.assertIn('id="fetch-jd" type="checkbox"', self.html)
+        self.assertNotIn('id="fetch-jd" type="checkbox" checked', self.html)
+        self.assertIn('id="max-details-field" hidden', self.html)
+        self.assertIn("maxDetailsField.hidden = !enabled", self.html)
+        for field_name in (
+            "job_id", "title", "location", "salary", "experience",
+            "company_scale", "company_stage", "company_industry",
+        ):
+            self.assertIn(f'value="{field_name}" checked', self.html)
+        self.assertNotIn('value="company" checked', self.html)
+        self.assertIn('value="location" checked>公司地点', self.html)
 
     def test_switch_account_entry_and_confirmation_are_present(self):
         self.assertIn('id="switch-account-button"', self.html)

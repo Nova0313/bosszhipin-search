@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -31,6 +32,7 @@ except ImportError:  # Direct execution: python scripts/web_app.py
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INDEX_PATH = PROJECT_ROOT / "web" / "index.html"
 SUPPORTED_TABLE_SUFFIXES = {".csv", ".tsv", ".xlsx", ".xlsm"}
+DEFAULT_LLM_JOB_REQUIREMENTS = "我们寻找和AI相关或对AI算力有潜在需求的岗位"
 LIST_PROGRESS_RE = re.compile(r"===\s*组合\s+(\d+)/(\d+):")
 DETAIL_TOTAL_RE = re.compile(r"===\s*抓取岗位详情\s*\((\d+)\s*个\)")
 DETAIL_PROGRESS_RE = re.compile(r"^\[(\d+)/(\d+)\]")
@@ -55,7 +57,8 @@ class ScrapeTask:
     command: list[str]
     csv_path: str = ""
     json_path: str = ""
-    fetch_jd: bool = True
+    companies_csv_path: str = ""
+    fetch_jd: bool = False
     state: str = "queued"
     phase: str = "准备启动"
     progress: int = 0
@@ -78,6 +81,7 @@ class ScrapeTask:
             "output_path": self.output_path,
             "csv_path": self.csv_path,
             "json_path": self.json_path,
+            "companies_csv_path": self.companies_csv_path,
             "state": self.state,
             "phase": self.phase,
             "progress": self.progress,
@@ -96,7 +100,7 @@ def default_output_root() -> Path:
     return PROJECT_ROOT / "result"
 
 
-def _boolean_value(value, default=True) -> bool:
+def _boolean_value(value, default=True, label="配置项") -> bool:
     if value is None:
         return default
     if isinstance(value, bool):
@@ -106,7 +110,7 @@ def _boolean_value(value, default=True) -> bool:
         return True
     if normalized in {"0", "false", "no", "off"}:
         return False
-    raise WebRequestError("是否抓取 JD 必须是布尔值")
+    raise WebRequestError(f"{label}必须是布尔值")
 
 
 def _date_value(value, label: str) -> str:
@@ -161,13 +165,25 @@ def normalize_start_request(payload: dict) -> dict:
             raise WebRequestError("每个组合的页数必须是正整数，或留空抓取全部页")
 
     try:
-        interval = float(payload.get("interval", 10))
+        interval = float(payload.get("interval", 3))
     except (TypeError, ValueError) as exc:
         raise WebRequestError("抓取时间间隔必须是数字") from exc
     if interval < 0 or interval > 600:
         raise WebRequestError("抓取时间间隔必须在 0-600 秒之间")
 
-    fetch_jd = _boolean_value(payload.get("fetch_jd"), default=True)
+    try:
+        keyword_match_threshold = float(payload.get(
+            "keyword_match_threshold",
+            boss.KEYWORD_FUZZY_MATCH_THRESHOLD,
+        ))
+    except (TypeError, ValueError) as exc:
+        raise WebRequestError("岗位关键词模糊匹配阈值必须是数字") from exc
+    if not math.isfinite(keyword_match_threshold) or not 0 <= keyword_match_threshold <= 1:
+        raise WebRequestError("岗位关键词模糊匹配阈值必须在 0-1 之间")
+
+    fetch_jd = _boolean_value(
+        payload.get("fetch_jd"), default=False, label="是否抓取 JD",
+    )
 
     max_details = payload.get("max_details") if fetch_jd else None
     if max_details in (None, ""):
@@ -188,6 +204,27 @@ def normalize_start_request(payload: dict) -> dict:
     published_to = _date_value(payload.get("published_to"), "发布时间结束日期")
     if published_from and published_to and published_from > published_to:
         raise WebRequestError("发布时间起始日期不能晚于结束日期")
+    fetch_publish_time = _boolean_value(
+        payload.get("fetch_publish_time"),
+        default=bool(published_from or published_to),
+        label="是否查询岗位发布时间",
+    )
+    if not fetch_publish_time:
+        published_from = ""
+        published_to = ""
+
+    job_requirements = str(payload.get("job_requirements") or "").strip()
+    if len(job_requirements) > 10000:
+        raise WebRequestError("岗位需求不能超过 10000 个字符")
+    llm_filter_enabled = _boolean_value(
+        payload.get("llm_filter_enabled"),
+        default=True,
+        label="是否启用 LLM 岗位相关性筛选",
+    )
+    if llm_filter_enabled and not job_requirements:
+        job_requirements = DEFAULT_LLM_JOB_REQUIREMENTS
+    elif not llm_filter_enabled:
+        job_requirements = ""
 
     raw_fields = payload.get("output_fields")
     if raw_fields is None:
@@ -215,12 +252,16 @@ def normalize_start_request(payload: dict) -> dict:
         "output_root": output_root,
         "pages": pages,
         "interval": interval,
+        "keyword_match_threshold": keyword_match_threshold,
         "fetch_jd": fetch_jd,
+        "fetch_publish_time": fetch_publish_time,
         "output_fields": output_fields,
         "max_details": max_details,
         "company_match": company_match,
         "published_from": published_from,
         "published_to": published_to,
+        "llm_filter_enabled": llm_filter_enabled,
+        "job_requirements": job_requirements,
     }
 
 
@@ -236,6 +277,11 @@ def build_command(options: dict) -> list[str]:
         str(options["result_dir"]),
         "--interval",
         str(options["interval"]),
+        "--keyword-match-threshold",
+        str(options.get(
+            "keyword_match_threshold",
+            boss.KEYWORD_FUZZY_MATCH_THRESHOLD,
+        )),
         "--output-fields",
         ",".join(options["output_fields"]),
         "--company-match",
@@ -243,14 +289,20 @@ def build_command(options: dict) -> list[str]:
     ]
     if options["pages"] is not None:
         command.extend(["--pages", str(options["pages"])])
+    command.append(
+        "--fetch-publish-time"
+        if options.get("fetch_publish_time", False)
+        else "--no-fetch-publish-time"
+    )
     if options.get("published_from"):
         command.extend(["--published-from", options["published_from"]])
     if options.get("published_to"):
         command.extend(["--published-to", options["published_to"]])
     if options["fetch_jd"] and options["max_details"] is not None:
         command.extend(["--max-details", str(options["max_details"])])
-    if not options["fetch_jd"]:
-        command.append("--no-detail")
+    command.append("--fetch-detail" if options["fetch_jd"] else "--no-detail")
+    if options.get("job_requirements"):
+        command.extend(["--job-requirements", options["job_requirements"]])
     return command
 
 
@@ -330,6 +382,12 @@ def update_progress_from_line(task: ScrapeTask, line: str) -> None:
     if "结果 CSV 已保存" in line:
         task.phase = "正在完成输出"
         task.progress = max(task.progress, 97)
+    elif "=== LLM 语义理解岗位" in line:
+        task.phase = "LLM 正在语义理解岗位"
+        task.progress = max(task.progress, 90)
+    elif "=== 抓取公司工商信息" in line:
+        task.phase = "正在抓取公司全称和信用代码"
+        task.progress = max(task.progress, 94)
 
 
 class ScrapeTaskManager:
@@ -364,6 +422,10 @@ class ScrapeTaskManager:
                 command=build_command(options),
                 csv_path=csv_path,
                 json_path=json_path,
+                companies_csv_path=(
+                    str(result_dir / "companies.csv")
+                    if options["job_requirements"] else ""
+                ),
                 fetch_jd=options["fetch_jd"],
             )
             self._tasks[task.job_id] = task
@@ -397,6 +459,7 @@ class ScrapeTaskManager:
                 command=list(previous.command),
                 csv_path=previous.csv_path,
                 json_path=previous.json_path,
+                companies_csv_path=previous.companies_csv_path,
                 fetch_jd=previous.fetch_jd,
                 phase="准备从检查点继续",
                 resumed_from=previous.job_id,

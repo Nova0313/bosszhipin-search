@@ -9,7 +9,8 @@ Boolean semantics are deliberately explicit:
 * rows have no positional relationship and may have different lengths;
 * results are merged by job_id (with a stable fallback key).
 
-No model, embedding, semantic classifier, or model API is used.
+An optional LLM API step can screen the scraped jobs against a
+free-form requirement before relevant companies are aggregated.
 """
 
 from __future__ import annotations
@@ -34,8 +35,10 @@ from xml.etree import ElementTree as ET
 
 try:
     from . import boss_cdp_raw as boss
+    from . import llm_filter
 except ImportError:  # Direct execution: python scripts/batch_search.py ...
     import boss_cdp_raw as boss
+    import llm_filter
 
 
 __version__ = boss.__version__
@@ -531,6 +534,7 @@ def job_matches_combination(
     combination: SearchCombination,
     job: dict,
     company_match: str = "contains",
+    keyword_match_threshold: float = boss.KEYWORD_FUZZY_MATCH_THRESHOLD,
 ) -> bool:
     """Apply the current combination's post-search match to one list job."""
     if combination.mode == MODE_COMPANY:
@@ -539,7 +543,11 @@ def job_matches_combination(
             job.get("boss_name") or job.get("company") or "",
             company_match,
         )
-    return boss.job_title_matches_keyword(combination.search_term, job)
+    return boss.job_title_matches_keyword(
+        combination.search_term,
+        job,
+        threshold=keyword_match_threshold,
+    )
 
 
 def execute_plan(
@@ -549,6 +557,7 @@ def execute_plan(
     allow_dom_fallback: bool,
     delay: float,
     company_match: str = "contains",
+    keyword_match_threshold: float = boss.KEYWORD_FUZZY_MATCH_THRESHOLD,
     scrape_func: Callable | None = None,
     start_index: int = 0,
     initial_jobs: Iterable[dict] | None = None,
@@ -587,7 +596,7 @@ def execute_plan(
                 allow_dom_fallback=allow_dom_fallback,
                 request_interval=delay,
                 job_matcher=lambda job: job_matches_combination(
-                    combination, job, company_match,
+                    combination, job, company_match, keyword_match_threshold,
                 ),
             )
             raw_jobs = data.get("jobs", []) if isinstance(data, dict) else []
@@ -596,7 +605,12 @@ def execute_plan(
             # scrape functions and older integrations that return unfiltered jobs.
             found_jobs = [
                 job for job in raw_jobs
-                if job_matches_combination(combination, job, company_match)
+                if job_matches_combination(
+                    combination,
+                    job,
+                    company_match,
+                    keyword_match_threshold,
+                )
             ]
             runs.append({
                 **condition,
@@ -654,7 +668,7 @@ OUTPUT_FIELD_LABELS = {
     "job_id": "Job ID",
     "title": "职位名称",
     "company": "公司",
-    "location": "地点",
+    "location": "公司地点",
     "salary": "薪资",
     "experience": "工作经验",
     "publish_date": "发布时间",
@@ -666,13 +680,15 @@ OUTPUT_FIELD_LABELS = {
     "company_industry": "公司行业",
     "skills": "技能标签",
     "welfare": "福利",
+    "llm_match_reason": "LLM 语义判断理由",
 }
 FINAL_CSV_COLUMNS = [
-    "job_id", "title", "company", "location", "salary", "experience",
-    "publish_date", "jd",
+    "job_id", "title", "location", "salary", "experience",
+    "company_scale", "company_stage", "company_industry",
 ]
 DEFAULT_RESULT_ROOT = Path(__file__).resolve().parents[1] / "result"
 CHECKPOINT_SCHEMA_VERSION = 2
+COMPANY_CSV_COLUMNS = ["company_full_name", "unified_social_credit_code"]
 
 
 def search_checkpoint_fingerprint(
@@ -681,6 +697,7 @@ def search_checkpoint_fingerprint(
     pages: int | None,
     company_match: str,
     allow_dom_fallback: bool,
+    keyword_match_threshold: float = boss.KEYWORD_FUZZY_MATCH_THRESHOLD,
 ) -> str:
     """Build a stable key for list-search inputs that affect candidate jobs."""
     table = Path(table_path).expanduser().resolve()
@@ -690,6 +707,7 @@ def search_checkpoint_fingerprint(
         "combinations": [combination.to_dict() for combination in combinations],
         "pages": pages,
         "company_match": company_match,
+        "keyword_match_threshold": keyword_match_threshold,
         "allow_dom_fallback": bool(allow_dom_fallback),
     }
     encoded = json.dumps(
@@ -826,6 +844,101 @@ def write_final_json(json_path: str, records: list[dict], fields: list[str] | No
     print(f"结果 JSON 已保存: {json_path}")
 
 
+def aggregate_relevant_companies(records: Iterable[dict]) -> list[dict]:
+    """Aggregate LLM-matched jobs into unique BOSS companies."""
+    companies = {}
+    for record in records:
+        source_name = str(record.get("company") or record.get("boss_name") or "").strip()
+        company_link = str(record.get("company_link") or "").strip()
+        brand_id = str(record.get("encrypt_brand_id") or "").strip()
+        normalized_name = re.sub(r"\s+", "", source_name).casefold()
+        key = brand_id or company_link.casefold() or normalized_name
+        if not key:
+            continue
+        if key not in companies:
+            companies[key] = {
+                "source_company_name": source_name,
+                "company_link": company_link,
+                "encrypt_brand_id": brand_id,
+                "matched_job_count": 0,
+                "matched_job_titles": [],
+            }
+        company = companies[key]
+        company["matched_job_count"] += 1
+        title = str(record.get("title") or "").strip()
+        if title and title not in company["matched_job_titles"]:
+            company["matched_job_titles"].append(title)
+        if not company["company_link"] and company_link:
+            company["company_link"] = company_link
+    return list(companies.values())
+
+
+def write_company_csv(csv_path: str, companies: Iterable[dict]) -> None:
+    """Write the exact two-column company deliverable requested by the user."""
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=COMPANY_CSV_COLUMNS,
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for company in companies:
+            if not any(company.get(column) for column in COMPANY_CSV_COLUMNS):
+                continue
+            writer.writerow({column: company.get(column, "") for column in COMPANY_CSV_COLUMNS})
+    print(f"公司 CSV 已保存: {csv_path}")
+
+
+def deduplicate_company_registrations(companies: Iterable[dict]) -> list[dict]:
+    """Collapse multiple BOSS brands that resolve to the same legal entity."""
+    unique = {}
+    name_to_key = {}
+    for item in companies:
+        company = dict(item)
+        credit_code = str(company.get("unified_social_credit_code") or "").upper().strip()
+        full_name = str(company.get("company_full_name") or "").strip()
+        source_name = str(company.get("source_company_name") or "").strip()
+        company_link = str(company.get("company_link") or "").strip()
+        normalized_full_name = re.sub(r"\s+", "", full_name).casefold()
+        fallback = company_link.casefold() or re.sub(r"\s+", "", source_name).casefold()
+        if normalized_full_name and normalized_full_name in name_to_key:
+            key = name_to_key[normalized_full_name]
+        elif credit_code:
+            key = f"code:{credit_code}"
+        elif normalized_full_name:
+            key = f"name:{normalized_full_name}"
+        else:
+            key = f"fallback:{fallback}" if fallback else ""
+        if not key:
+            continue
+        company["unified_social_credit_code"] = credit_code
+        if key not in unique:
+            unique[key] = company
+            if normalized_full_name:
+                name_to_key[normalized_full_name] = key
+            continue
+        existing = unique[key]
+        existing["matched_job_count"] = (
+            int(existing.get("matched_job_count") or 0)
+            + int(company.get("matched_job_count") or 0)
+        )
+        titles = list(existing.get("matched_job_titles") or [])
+        for title in company.get("matched_job_titles") or []:
+            if title not in titles:
+                titles.append(title)
+        existing["matched_job_titles"] = titles
+        for field_name in (
+            "company_full_name", "unified_social_credit_code",
+            "source_company_name", "company_link",
+        ):
+            if not existing.get(field_name) and company.get(field_name):
+                existing[field_name] = company[field_name]
+        if normalized_full_name:
+            name_to_key[normalized_full_name] = key
+    return list(unique.values())
+
+
 def load_partial_detail_records(path: str) -> list[dict]:
     """Load incrementally saved JD records from an interrupted result folder."""
     detail_path = Path(path)
@@ -940,8 +1053,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="每个搜索组合的页数上限（默认全部；手动设置正整数）")
     parser.add_argument("--max-combinations", type=int, default=64,
                         help="表格最大展开组合数（默认 64）")
-    parser.add_argument("--interval", "--delay", dest="interval", type=float, default=10.0,
-                        help="翻页和岗位详情之间的等待秒数（默认 10）；组合间固定等待 10 秒")
+    parser.add_argument("--interval", "--delay", dest="interval", type=float, default=3.0,
+                        help="翻页和岗位详情之间的等待秒数（默认 3）；组合间固定等待 10 秒")
+    parser.add_argument(
+        "--keyword-match-threshold",
+        type=float,
+        default=boss.KEYWORD_FUZZY_MATCH_THRESHOLD,
+        help=(
+            "岗位关键词模糊匹配阈值，范围 0-1"
+            f"（默认 {boss.KEYWORD_FUZZY_MATCH_THRESHOLD:.2f}）"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="只校验表格并展示组合，不连接 Chrome")
     parser.add_argument("--output-dir", "--output", dest="output_dir", default=None,
@@ -951,16 +1073,51 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-dom-fallback", action="store_true")
     parser.add_argument("--max-details", type=int, default=None,
                         help="最多抓取多少个详情（默认全部）")
-    parser.add_argument("--no-detail", dest="fetch_jd", action="store_false", default=True,
-                        help="不抓取 JD，直接输出职位列表")
+    detail_group = parser.add_mutually_exclusive_group()
+    detail_group.add_argument(
+        "--fetch-detail", dest="fetch_jd", action="store_true", default=False,
+        help="逐个打开岗位详情页抓取 JD",
+    )
+    detail_group.add_argument(
+        "--no-detail", dest="fetch_jd", action="store_false",
+        help="不抓取 JD，直接输出职位列表（默认）",
+    )
     parser.add_argument("--output-fields", default=None,
                         help=f"逗号分隔的输出字段（默认 {','.join(FINAL_CSV_COLUMNS)}）")
     parser.add_argument("--published-from", default=None, metavar="YYYY-MM-DD",
                         help="岗位发布时间起始日期（包含当天）")
     parser.add_argument("--published-to", default=None, metavar="YYYY-MM-DD",
                         help="岗位发布时间结束日期（包含当天）")
+    publish_time_group = parser.add_mutually_exclusive_group()
+    publish_time_group.add_argument(
+        "--fetch-publish-time",
+        dest="fetch_publish_time",
+        action="store_true",
+        default=None,
+        help="逐个打开岗位详情页补查发布时间",
+    )
+    publish_time_group.add_argument(
+        "--no-fetch-publish-time",
+        dest="fetch_publish_time",
+        action="store_false",
+        help="不额外打开详情页补查发布时间",
+    )
     parser.add_argument("--company-match", choices=["contains", "exact"], default="contains",
                         help="公司模式的公司名校验策略（默认 contains）")
+    parser.add_argument(
+        "--job-requirements",
+        default="",
+        help=(
+            "用自然语言描述需求；非空时由 LLM 作岗位语义判断，"
+            "再由代码聚合公司并输出 companies.csv"
+        ),
+    )
+    parser.add_argument(
+        "--llm-batch-size",
+        type=int,
+        default=llm_filter.DEFAULT_BATCH_SIZE,
+        help=f"LLM 每批岗位数（默认 {llm_filter.DEFAULT_BATCH_SIZE}）",
+    )
     parser.add_argument("--analysis", action="store_true", help="输出固定规则聚合分析")
     return parser
 
@@ -973,13 +1130,28 @@ def main(argv=None) -> int:
     if args.interval < 0:
         print("❌ --interval 不能小于 0")
         return 2
+    if not 0 <= args.keyword_match_threshold <= 1:
+        print("❌ --keyword-match-threshold 必须在 0-1 之间")
+        return 2
     if args.max_details is not None and args.max_details <= 0:
         print("❌ --max-details 必须大于 0")
+        return 2
+    job_requirements = str(args.job_requirements or "").strip()
+    if len(job_requirements) > 10000:
+        print("❌ --job-requirements 不能超过 10000 个字符")
+        return 2
+    if not 1 <= args.llm_batch_size <= 100:
+        print("❌ --llm-batch-size 必须在 1-100 之间")
         return 2
     try:
         output_fields = parse_output_fields(args.output_fields)
         published_from, published_to = parse_publish_date_range(
             args.published_from, args.published_to,
+        )
+        fetch_publish_time = (
+            args.fetch_publish_time
+            if args.fetch_publish_time is not None
+            else bool(published_from or published_to)
         )
         rules, combinations = build_plan(
             args.table,
@@ -1019,6 +1191,13 @@ def main(argv=None) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
+    if job_requirements:
+        try:
+            llm_filter.validate_environment()
+        except llm_filter.LLMFilterError as exc:
+            print(f"❌ LLM 配置无效: {exc}")
+            return 2
+
     if not boss.require_runtime_dependencies("requests", "websocket"):
         return 1
 
@@ -1029,6 +1208,7 @@ def main(argv=None) -> int:
             args.pages,
             args.company_match,
             args.allow_dom_fallback,
+            args.keyword_match_threshold,
         )
         checkpoint_path = search_checkpoint_path(
             args.table,
@@ -1082,6 +1262,7 @@ def main(argv=None) -> int:
                 allow_dom_fallback=args.allow_dom_fallback,
                 delay=args.interval,
                 company_match=args.company_match,
+                keyword_match_threshold=args.keyword_match_threshold,
                 start_index=combination_next_index,
                 initial_jobs=jobs,
                 initial_runs=runs,
@@ -1105,7 +1286,7 @@ def main(argv=None) -> int:
         print("列表检索已在检查点中完成，跳过重复检索")
 
     publish_filter_stats = None
-    if published_from or published_to:
+    if fetch_publish_time:
         def save_publish_progress(current_jobs, next_index):
             save_search_checkpoint(
                 checkpoint_path,
@@ -1127,6 +1308,8 @@ def main(argv=None) -> int:
         except (RuntimeError, boss.CDPConnectionError, OSError) as exc:
             print(f"❌ 发布时间读取中止，检查点已保留: {exc}")
             return 1
+
+    if published_from or published_to:
         jobs, publish_filter_stats = filter_jobs_by_publish_date(
             jobs, published_from, published_to,
         )
@@ -1149,11 +1332,16 @@ def main(argv=None) -> int:
             "pages": args.pages,
             "interval": args.interval,
             "fetch_jd": args.fetch_jd,
+            "fetch_publish_time": fetch_publish_time,
             "max_details": args.max_details,
             "company_match": args.company_match,
+            "keyword_match_threshold": args.keyword_match_threshold,
             "published_from": args.published_from,
             "published_to": args.published_to,
             "output_fields": output_fields,
+            "llm_filter_enabled": bool(job_requirements),
+            "llm_batch_size": args.llm_batch_size,
+            "job_requirements": job_requirements,
         },
         "publish_filter_stats": publish_filter_stats,
     })
@@ -1200,11 +1388,60 @@ def main(argv=None) -> int:
     elif jobs:
         records = [export_record_from_job(job) for job in jobs]
         print("已关闭 JD 抓取，直接输出职位列表")
+
+    candidate_record_count = len(records)
+    company_registrations = []
+    companies_csv_path = str(result_dir / "companies.csv")
+    if job_requirements:
+        print(f"\n=== LLM 语义理解岗位 ({candidate_record_count} 个) ===\n")
+        try:
+            records = llm_filter.filter_relevant_jobs(
+                records,
+                job_requirements,
+                batch_size=args.llm_batch_size,
+            )
+        except llm_filter.LLMFilterError as exc:
+            print(f"❌ LLM 岗位语义判断中止，检查点已保留: {exc}")
+            return 1
+        print(f"LLM 语义判断完成: {candidate_record_count} 条候选 -> {len(records)} 条相关岗位")
+
+        companies = aggregate_relevant_companies(records)
+        print(f"相关岗位聚合为 {len(companies)} 家公司")
+        try:
+            company_registrations = boss.scrape_company_registrations(
+                companies,
+                cdp_port=args.cdp_port,
+                request_interval=args.interval,
+            )
+        except (RuntimeError, boss.CDPConnectionError, OSError) as exc:
+            print(f"❌ 公司工商信息抓取中止，检查点已保留: {exc}")
+            return 1
+        company_registrations = deduplicate_company_registrations(
+            company_registrations
+        )
+        print(f"法定主体去重后共 {len(company_registrations)} 家")
+        write_company_csv(companies_csv_path, company_registrations)
+
+    payload["candidate_total"] = candidate_record_count
+    payload["total"] = len(records)
+    payload["jobs"] = records
+    payload["llm_filter"] = {
+        "enabled": bool(job_requirements),
+        "requirements": job_requirements,
+        "provider": llm_filter.configured_provider() if job_requirements else "",
+        "model": llm_filter.configured_model_name() if job_requirements else "",
+        "candidate_jobs": candidate_record_count,
+        "relevant_jobs": len(records),
+    }
+    payload["companies"] = company_registrations
+    boss._atomic_write_json(metadata_path, payload)
     write_final_json(json_path, records, output_fields)
     write_final_csv(csv_path, records, output_fields)
     print(f"结果目录: {result_dir}")
     print(f"最终输出 {len(records)} 条岗位记录")
     if args.analysis:
+        list_data["jobs"] = records
+        list_data["total"] = len(records)
         boss.analyze(list_data, records, search_keyword="")
     try:
         checkpoint_path.unlink(missing_ok=True)
