@@ -636,7 +636,9 @@ def execute_plan(
             if progress_callback:
                 progress_callback(list(jobs_by_key.values()), runs, index)
             if index < len(combinations) and delay > 0:
-                wait_seconds = COMBINATION_INTERVAL_SECONDS
+                wait_seconds = boss.randomized_request_interval(
+                    COMBINATION_INTERVAL_SECONDS
+                )
                 print(f"组合间等待 {wait_seconds:.1f}s，降低请求密度...")
                 time.sleep(wait_seconds)
     return list(jobs_by_key.values()), runs
@@ -1054,7 +1056,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-combinations", type=int, default=64,
                         help="表格最大展开组合数（默认 64）")
     parser.add_argument("--interval", "--delay", dest="interval", type=float, default=3.0,
-                        help="翻页和岗位详情之间的等待秒数（默认 3）；组合间固定等待 10 秒")
+                        help="翻页和岗位详情的基准等待秒数（默认 3，每次在 ±20%% 内随机）；组合间以 10 秒为基准随机等待")
     parser.add_argument(
         "--keyword-match-threshold",
         type=float,

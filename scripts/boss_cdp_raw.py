@@ -68,6 +68,21 @@ CITY_GROUP_URL = "https://www.zhipin.com/wapi/zpCommon/data/cityGroup.json"
 
 # 请求频率保护
 MAX_API_REQUESTS = 5000  # 单次最大页面/API 请求数
+REQUEST_INTERVAL_JITTER_RATIO = 0.2
+
+
+def randomized_request_interval(configured_seconds):
+    """按设定值生成单次请求等待时间。
+
+    每次在设定值的 ±20% 范围内独立取值，避免固定周期请求。
+    0 仍表示不等待，便于测试和显式关闭间隔。
+    """
+    seconds = float(configured_seconds or 0)
+    if seconds <= 0:
+        return 0.0
+    spread = seconds * REQUEST_INTERVAL_JITTER_RATIO
+    return random.uniform(seconds - spread, seconds + spread)
+
 
 class ChromeExecutableNotFoundError(RuntimeError):
     """No Chromium-compatible browser executable could be found."""
@@ -2090,7 +2105,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
 
             if max_pages is None or pg < max_pages:
                 wait_seconds = (
-                    float(request_interval)
+                    randomized_request_interval(request_interval)
                     if request_interval is not None
                     else random.uniform(12, 22)
                 )
@@ -2332,7 +2347,7 @@ def scrape_publish_times(
 
         if index < len(jobs):
             gap = (
-                float(request_interval)
+                randomized_request_interval(request_interval)
                 if request_interval is not None
                 else random.uniform(10, 25)
             )
@@ -2407,7 +2422,7 @@ def scrape_company_registrations(
 
         if index < len(companies):
             gap = (
-                float(request_interval)
+                randomized_request_interval(request_interval)
                 if request_interval is not None
                 else random.uniform(10, 25)
             )
@@ -2542,7 +2557,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
         ws.close()
         if idx + 1 < len(jobs):
             gap = (
-                float(request_interval)
+                randomized_request_interval(request_interval)
                 if request_interval is not None
                 else random.uniform(10, 25)
             )

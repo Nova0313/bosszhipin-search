@@ -86,6 +86,12 @@ def write_minimal_xlsx(path, rows, sheet_name="搜索条件"):
 
 
 class TagParsingTests(unittest.TestCase):
+    def test_help_describes_randomized_request_interval(self):
+        help_text = module.build_arg_parser().format_help()
+
+        self.assertIn("±20%", help_text)
+        self.assertIn("以 10 秒为基准随机等待", help_text)
+
     def test_split_tags_supports_common_separators_and_deduplicates(self):
         self.assertEqual(
             module.split_tags("Python, Go；Java|Python\nRust、C++"),
@@ -288,7 +294,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(len(shared["matched_conditions"]), 2)
         self.assertEqual(len(runs), 2)
 
-    def test_request_interval_is_forwarded_and_combination_wait_is_fixed(self):
+    def test_request_interval_is_forwarded_and_combination_wait_is_randomized(self):
         combinations = [
             module.SearchCombination("Python", "上海", "101020100", "406", "105"),
             module.SearchCombination("Go", "上海", "101020100", "406", "105"),
@@ -299,14 +305,17 @@ class ExecutionTests(unittest.TestCase):
             request_intervals.append(kwargs.get("request_interval"))
             return {"jobs": []}
 
-        with mock.patch.object(module.time, "sleep") as sleep:
+        with mock.patch.object(
+            module.boss, "randomized_request_interval", return_value=11.5
+        ) as randomize, mock.patch.object(module.time, "sleep") as sleep:
             module.execute_plan(
                 combinations, pages=1, cdp_port=9222, allow_dom_fallback=False,
                 delay=2.5, scrape_func=fake_scrape,
             )
 
         self.assertEqual(request_intervals, [2.5, 2.5])
-        sleep.assert_called_once_with(module.COMBINATION_INTERVAL_SECONDS)
+        randomize.assert_called_once_with(module.COMBINATION_INTERVAL_SECONDS)
+        sleep.assert_called_once_with(11.5)
 
     def test_execute_plan_resumes_after_completed_combination(self):
         combinations = [

@@ -298,6 +298,7 @@ class HtmlContentTests(unittest.TestCase):
 
     def test_default_interval_jd_and_output_fields_are_present(self):
         self.assertIn('id="interval" type="number" min="0" max="600" step="0.5" value="3"', self.html)
+        self.assertIn("基准间隔的 ±20% 内随机等待", self.html)
         self.assertIn('id="fetch-jd" type="checkbox"', self.html)
         self.assertNotIn('id="fetch-jd" type="checkbox" checked', self.html)
         self.assertIn('id="max-details-field" hidden', self.html)

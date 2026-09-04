@@ -37,6 +37,24 @@ def load_module():
 
 
 class ChromeSetupTests(unittest.TestCase):
+    def test_configured_request_interval_uses_twenty_percent_jitter(self):
+        module = load_module()
+
+        with mock.patch.object(module.random, "uniform", return_value=9.25) as uniform:
+            result = module.randomized_request_interval(10)
+
+        self.assertEqual(result, 9.25)
+        uniform.assert_called_once_with(8.0, 12.0)
+
+    def test_zero_request_interval_stays_zero_without_random_draw(self):
+        module = load_module()
+
+        with mock.patch.object(module.random, "uniform") as uniform:
+            result = module.randomized_request_interval(0)
+
+        self.assertEqual(result, 0.0)
+        uniform.assert_not_called()
+
     def test_cdp_send_wraps_broken_pipe_as_actionable_connection_error(self):
         module = load_module()
         module.websocket = mock.Mock(
@@ -667,7 +685,9 @@ class ChromeSetupTests(unittest.TestCase):
         with mock.patch.object(module, "CDPSession", side_effect=[first, second]), \
                 mock.patch.object(module, "create_page_session", return_value=("target", "session")), \
                 mock.patch.object(module, "incr_request") as increment, \
-                mock.patch.object(module.random, "uniform", return_value=0), \
+                mock.patch.object(
+                    module.random, "uniform", side_effect=lambda low, high: (low + high) / 2
+                ) as uniform, \
                 mock.patch.object(module.time, "sleep") as sleep, \
                 redirect_stdout(io.StringIO()):
             results = module.scrape_company_registrations(
@@ -679,6 +699,7 @@ class ChromeSetupTests(unittest.TestCase):
         ])
         self.assertEqual(increment.call_count, 2)
         self.assertIn(mock.call(10.0), sleep.call_args_list)
+        self.assertIn(mock.call(8.0, 12.0), uniform.call_args_list)
         first.close.assert_called_once()
         second.close.assert_called_once()
 
