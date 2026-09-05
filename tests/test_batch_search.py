@@ -767,6 +767,55 @@ class ExecutionTests(unittest.TestCase):
             "unified_social_credit_code": "91110108MA01234567",
         }])
 
+    def test_job_company_mapping_joins_jobs_to_boss_company_registration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = pathlib.Path(temp_dir) / "job_company_mapping.csv"
+            module.write_job_company_mapping_csv(
+                str(output_path),
+                [
+                    {
+                        "job_id": "job-1",
+                        "encrypt_brand_id": "brand-1",
+                        "company": "示例科技",
+                    },
+                    {
+                        "job_id": "job-2",
+                        "company_link": "https://www.zhipin.com/gongsi/brand-2.html",
+                        "company": "另一家公司",
+                    },
+                ],
+                [
+                    {
+                        "encrypt_brand_id": "brand-1",
+                        "company_full_name": "北京示例科技有限公司",
+                        "unified_social_credit_code": "91110108MA01234567",
+                    },
+                    {
+                        "encrypt_brand_id": "brand-2",
+                        "company_full_name": "上海另一家公司有限公司",
+                        "unified_social_credit_code": "91310101MA07654321",
+                    },
+                ],
+            )
+            with open(output_path, encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(list(rows[0]), module.JOB_COMPANY_MAPPING_CSV_COLUMNS)
+        self.assertEqual(rows, [
+            {
+                "job_id": "job-1",
+                "boss_company_id": "brand-1",
+                "company_full_name": "北京示例科技有限公司",
+                "unified_social_credit_code": "91110108MA01234567",
+            },
+            {
+                "job_id": "job-2",
+                "boss_company_id": "brand-2",
+                "company_full_name": "上海另一家公司有限公司",
+                "unified_social_credit_code": "91310101MA07654321",
+            },
+        ])
+
     def test_company_registrations_are_deduplicated_by_credit_code(self):
         companies = module.deduplicate_company_registrations([
             {

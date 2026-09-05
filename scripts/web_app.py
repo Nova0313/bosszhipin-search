@@ -58,6 +58,7 @@ class ScrapeTask:
     csv_path: str = ""
     json_path: str = ""
     companies_csv_path: str = ""
+    job_company_mapping_csv_path: str = ""
     fetch_jd: bool = False
     state: str = "queued"
     phase: str = "准备启动"
@@ -82,6 +83,7 @@ class ScrapeTask:
             "csv_path": self.csv_path,
             "json_path": self.json_path,
             "companies_csv_path": self.companies_csv_path,
+            "job_company_mapping_csv_path": self.job_company_mapping_csv_path,
             "state": self.state,
             "phase": self.phase,
             "progress": self.progress,
@@ -426,6 +428,10 @@ class ScrapeTaskManager:
                     str(result_dir / "companies.csv")
                     if options["job_requirements"] else ""
                 ),
+                job_company_mapping_csv_path=(
+                    str(result_dir / "job_company_mapping.csv")
+                    if options["job_requirements"] else ""
+                ),
                 fetch_jd=options["fetch_jd"],
             )
             self._tasks[task.job_id] = task
@@ -460,6 +466,7 @@ class ScrapeTaskManager:
                 csv_path=previous.csv_path,
                 json_path=previous.json_path,
                 companies_csv_path=previous.companies_csv_path,
+                job_company_mapping_csv_path=previous.job_company_mapping_csv_path,
                 fetch_jd=previous.fetch_jd,
                 phase="准备从检查点继续",
                 resumed_from=previous.job_id,

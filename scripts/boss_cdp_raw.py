@@ -21,7 +21,7 @@ BOSS直聘职位抓取 + 规则分析 — 纯 Python/CDP 实现
 
 from __future__ import annotations
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 import json
 import time

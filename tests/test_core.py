@@ -32,8 +32,8 @@ class ProjectShapeTests(unittest.TestCase):
     def test_version_is_consistent(self):
         module = load_module()
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertEqual(module.__version__, "1.4.1")
-        self.assertIn('version = "1.4.1"', pyproject)
+        self.assertEqual(module.__version__, "1.4.2")
+        self.assertIn('version = "1.4.2"', pyproject)
 
     def test_default_paths_are_isolated(self):
         module = load_module()

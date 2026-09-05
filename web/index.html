@@ -327,7 +327,7 @@
           <div class="field">
             <label for="output-path">输出根目录（可选）</label>
             <input id="output-path" type="text" placeholder="留空则保存到项目 result/">
-            <p class="hint">每次任务会在该路径下新建独立文件夹；启用 LLM 时还会生成 companies.csv</p>
+            <p class="hint">每次任务会在该路径下新建独立文件夹；启用 LLM 时还会生成 companies.csv 和 job_company_mapping.csv（岗位 ID—BOSS 公司 ID—工商全称／信用代码）</p>
           </div>
           <div class="field two-col">
             <div>
@@ -581,7 +581,9 @@
         if (data.state === 'completed') {
           const companyOutput = data.companies_csv_path
             ? `\n公司 CSV：${data.companies_csv_path}` : '';
-          showMessage(`检索完成。结果目录：${data.output_path}\n岗位 CSV：${data.csv_path}\nJSON：${data.json_path}${companyOutput}`);
+          const mappingOutput = data.job_company_mapping_csv_path
+            ? `\n岗位-公司对应表：${data.job_company_mapping_csv_path}` : '';
+          showMessage(`检索完成。结果目录：${data.output_path}\n岗位 CSV：${data.csv_path}\nJSON：${data.json_path}${companyOutput}${mappingOutput}`);
         } else {
           const detail = data.error || data.phase || '任务未完成';
           showMessage(data.can_resume ? `${detail}\n可点击“继续中断任务”从已保存的检查点继续。` : detail, true);

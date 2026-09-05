@@ -691,6 +691,9 @@ FINAL_CSV_COLUMNS = [
 DEFAULT_RESULT_ROOT = Path(__file__).resolve().parents[1] / "result"
 CHECKPOINT_SCHEMA_VERSION = 2
 COMPANY_CSV_COLUMNS = ["company_full_name", "unified_social_credit_code"]
+JOB_COMPANY_MAPPING_CSV_COLUMNS = [
+    "job_id", "boss_company_id", "company_full_name", "unified_social_credit_code",
+]
 
 
 def search_checkpoint_fingerprint(
@@ -890,6 +893,66 @@ def write_company_csv(csv_path: str, companies: Iterable[dict]) -> None:
                 continue
             writer.writerow({column: company.get(column, "") for column in COMPANY_CSV_COLUMNS})
     print(f"公司 CSV 已保存: {csv_path}")
+
+
+def _boss_company_id(record: dict) -> str:
+    """Return the stable BOSS company/brand id used for joining outputs."""
+    brand_id = str(record.get("encrypt_brand_id") or "").strip()
+    if brand_id:
+        return brand_id
+    # DOM fallback records may only retain the company URL.  Keep the join
+    # useful there too, without treating a display name as an id.
+    company_link = str(record.get("company_link") or "").strip()
+    match = re.search(r"/gongsi/([^/?#]+?)(?:\.html)?(?:[/?#]|$)", company_link)
+    return match.group(1).strip() if match else ""
+
+
+def write_job_company_mapping_csv(
+    csv_path: str,
+    jobs: Iterable[dict],
+    registrations: Iterable[dict],
+) -> None:
+    """Write one row per final job joined to its BOSS company registration."""
+    registrations_by_key = {}
+    for registration in registrations:
+        item = dict(registration)
+        company_id = _boss_company_id(item)
+        company_link = str(item.get("company_link") or "").strip().casefold()
+        source_name = re.sub(
+            r"\s+", "", str(item.get("source_company_name") or "")
+        ).casefold()
+        for key in (company_id, company_link, source_name):
+            if key:
+                registrations_by_key.setdefault(key, item)
+
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=JOB_COMPANY_MAPPING_CSV_COLUMNS)
+        writer.writeheader()
+        for job in jobs:
+            item = dict(job)
+            company_id = _boss_company_id(item)
+            company_link = str(item.get("company_link") or "").strip().casefold()
+            source_name = re.sub(
+                r"\s+", "", str(item.get("company") or item.get("boss_name") or "")
+            ).casefold()
+            registration = (
+                registrations_by_key.get(company_id)
+                or registrations_by_key.get(company_link)
+                or registrations_by_key.get(source_name)
+                or {}
+            )
+            writer.writerow({
+                "job_id": item.get("job_id") or item.get("encrypt_job_id") or "",
+                "boss_company_id": company_id,
+                "company_full_name": str(
+                    registration.get("company_full_name") or ""
+                ).strip(),
+                "unified_social_credit_code": str(
+                    registration.get("unified_social_credit_code") or ""
+                ).upper().strip(),
+            })
+    print(f"岗位-公司对应表已保存: {csv_path}")
 
 
 def deduplicate_company_registrations(companies: Iterable[dict]) -> list[dict]:
@@ -1393,7 +1456,9 @@ def main(argv=None) -> int:
 
     candidate_record_count = len(records)
     company_registrations = []
+    company_registration_rows = []
     companies_csv_path = str(result_dir / "companies.csv")
+    job_company_mapping_csv_path = str(result_dir / "job_company_mapping.csv")
     if job_requirements:
         print(f"\n=== LLM 语义理解岗位 ({candidate_record_count} 个) ===\n")
         try:
@@ -1410,7 +1475,7 @@ def main(argv=None) -> int:
         companies = aggregate_relevant_companies(records)
         print(f"相关岗位聚合为 {len(companies)} 家公司")
         try:
-            company_registrations = boss.scrape_company_registrations(
+            company_registration_rows = boss.scrape_company_registrations(
                 companies,
                 cdp_port=args.cdp_port,
                 request_interval=args.interval,
@@ -1418,11 +1483,12 @@ def main(argv=None) -> int:
         except (RuntimeError, boss.CDPConnectionError, OSError) as exc:
             print(f"❌ 公司工商信息抓取中止，检查点已保留: {exc}")
             return 1
-        company_registrations = deduplicate_company_registrations(
-            company_registrations
-        )
+        company_registrations = deduplicate_company_registrations(company_registration_rows)
         print(f"法定主体去重后共 {len(company_registrations)} 家")
         write_company_csv(companies_csv_path, company_registrations)
+        write_job_company_mapping_csv(
+            job_company_mapping_csv_path, records, company_registration_rows,
+        )
 
     payload["candidate_total"] = candidate_record_count
     payload["total"] = len(records)
@@ -1436,6 +1502,9 @@ def main(argv=None) -> int:
         "relevant_jobs": len(records),
     }
     payload["companies"] = company_registrations
+    payload["job_company_mapping_csv"] = (
+        job_company_mapping_csv_path if job_requirements else ""
+    )
     boss._atomic_write_json(metadata_path, payload)
     write_final_json(json_path, records, output_fields)
     write_final_csv(csv_path, records, output_fields)

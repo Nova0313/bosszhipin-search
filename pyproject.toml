@@ -1,6 +1,6 @@
 [project]
 name = "boss-zhipin-pure-python"
-version = "1.4.1"
+version = "1.4.2"
 description = "BOSS直聘岗位抓取、可选 LLM 语义判断与代码化公司聚合 CLI"
 readme = "README.md"
 license = { text = "MIT" }

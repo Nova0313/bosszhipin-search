@@ -1,4 +1,4 @@
-# BOSS 直聘岗位检索工具 v1.4.1
+# BOSS 直聘岗位检索工具 v1.4.2
 
 一个基于 Python 和 Chrome DevTools Protocol（CDP）的 BOSS 直聘岗位检索工具。
 它支持按关键词或公司批量组合检索、职位去重、发布时间筛选、JD 详情抓取、
@@ -17,6 +17,7 @@ LLM 岗位语义判断、公司工商信息整理和中断任务续跑。
 - JD 详情：按需抓取 JD、技能标签、福利和招聘者活跃状态。
 - LLM 语义判断：支持硅基流动、DeepSeek、Gemini 和 OpenAI，并保留每个命中岗位的判断理由。
 - 公司聚合：将 LLM 命中岗位按公司聚合，读取企业全称和统一社会信用代码，再按法定主体去重。
+- 岗位-公司对应表：保留岗位 ID、BOSS 公司 ID（`encrypt_brand_id`）、工商全称和统一社会信用代码的逐岗位关联结果。
 - 可恢复任务：列表组合、发布时间和 JD 详情都有检查点保护。
 - 请求频率保护：操作间隔基于设定值随机化，并有组合数、请求数、连续失配和风控停止机制。
 
@@ -407,13 +408,20 @@ result/
     ├── jobs.csv
     ├── jobs.json
     ├── metadata.json
-    └── companies.csv   # 仅启用 LLM 岗位判断时生成
+    ├── companies.csv   # 仅启用 LLM 岗位判断时生成
+    └── job_company_mapping.csv  # 岗位与 BOSS 公司及工商主体对应表
 ```
 
 - `jobs.csv`：使用 UTF-8 BOM，便于 Excel 直接打开；字段由 `--output-fields` 控制。
 - `jobs.json`：与 CSV 使用相同的字段投影。
 - `metadata.json`：保留检索计划、组合运行统计、选项、日期筛选统计、LLM 信息和公司数据。
 - `companies.csv`：只包含 `company_full_name` 和 `unified_social_credit_code` 两列。
+- `job_company_mapping.csv`：启用 LLM 岗位判断时生成，每个最终岗位一行，包含
+  `job_id`、`boss_company_id`、`company_full_name` 和 `unified_social_credit_code`。
+  其中 `boss_company_id` 来自 BOSS 接口返回的 `encrypt_brand_id`；未抓到工商信息时仍保留岗位和公司 ID，工商字段为空。
+
+BOSS 直聘职位接口中的公司标识通常是加密的 `encryptBrandId`，不是公开的数字型公司 ID。
+抓取时会将其保存为 `encrypt_brand_id`，并据此生成公司主页链接；如果只使用已经导出的、未包含该字段的岗位 CSV，无法事后可靠恢复 BOSS 公司 ID。
 
 列表检索和发布时间进度保存在输出根目录的 `.checkpoints/` 中。重新使用相同规则表内容和
 会影响候选岗位的检索参数执行时，程序会自动识别并继续。Web 控制台的“继续中断任务”
