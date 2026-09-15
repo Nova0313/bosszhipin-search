@@ -159,16 +159,20 @@ VLA,,,,
 公司模式：
 
 ```csv
-公司名称,城市,薪资待遇,工作经验,求职类型
-字节跳动,北京,20-50K,3-5年,全职
-腾讯,,,,
+公司简称,工商全称,行业赛道
+字节跳动,北京字节跳动科技有限公司,互联网
+腾讯,深圳市腾讯计算机系统有限公司,互联网
 ```
 
 必需列：
 
 - 关键词模式：搜索关键词、城市、薪资待遇、工作经验。
-- 公司模式：公司名称、城市、薪资待遇、工作经验。
+- 公司模式：只需公司列。支持“公司简称”、“公司名称”、“公司名”、“工商全称”等表头；同时存在简称和工商全称时优先使用简称。
 - 求职类型为可选列；省略或整列留空时按“不限”处理。
+
+公司模式省略城市、薪资、经验和求职类型时，会自动按“全国 / 不限 / 不限 / 不限”检索。
+对于 CRM 或客户清单，只有城市一个同名业务列时不会将它误当成检索规则；
+只有当城市、薪资待遇、工作经验三列齐全时，公司模式才会应用这些筛选列。
 
 表头同时支持英文别名，例如 `keyword`、`company`、`city`、`salary`、
 `experience` 和 `job_type`。
@@ -184,8 +188,8 @@ VLA,,,,
 - 同一单元格可使用逗号、中文逗号、分号、`|`、顿号或换行填写多个 OR 值。
 - 同一列的重复值会去重。
 - 薪资、经验和求职类型留空时按“不限”处理。
-- 搜索关键词/公司名和城市列不能全空；全国检索请在城市列填“全国”。
-- 默认最多展开 64 个组合，可用 `--max-combinations` 显式调整。
+- 关键词模式的关键词和城市列不能全空；全国检索请在城市列填“全国”。
+- 关键词模式默认最多展开 64 个组合；公司模式默认最多 5000 家公司。可用 `--max-combinations` 显式调整。
 
 常用友好标签包括：
 
@@ -210,10 +214,14 @@ python -m scripts.batch_search examples/robotics_keyword_rules.csv \
 按公司检索：
 
 ```bash
-python -m scripts.batch_search examples/company_rules.csv \
+python -m scripts.batch_search company_list/AI创新业务客户导出_2026910.csv \
   --mode company \
   --output-dir result
 ```
+
+该命令会逐公司检索全国所有页，去重后汇总到同一份 `jobs.csv`。
+公司模式默认输出 `job_id,title,company,company_id,location,salary,experience`，
+其中 `company_id` 是 BOSS 返回的加密品牌 ID。
 
 只校验规则并查看展开后的组合，不启动 Chrome 职位抓取：
 
@@ -244,7 +252,7 @@ python -m scripts.batch_search examples/robotics_keyword_rules.csv \
 | `--mode keyword\|company` | 检索模式，默认 `keyword` |
 | `--sheet NAME` | Excel 工作表名，默认第一个 |
 | `--pages N` | 每个组合的页数上限；不填时抓取全部页 |
-| `--max-combinations N` | 规则表最大展开组合数，默认 64 |
+| `--max-combinations N` | 规则表最大展开组合数，默认关键词模式 64、公司模式 5000 |
 | `--interval SECONDS` | 列表翻页、发布时间、JD 和公司页的基准间隔，默认 3 秒 |
 | `--keyword-match-threshold N` | 关键词模糊匹配阈值，范围 0–1，默认 0.8 |
 | `--company-match contains\|exact` | 公司名校验策略，默认 `contains` |
@@ -266,7 +274,7 @@ python -m scripts.batch_search examples/robotics_keyword_rules.csv \
 可用的输出字段：
 
 ```text
-job_id,title,company,location,salary,experience,publish_date,jd,job_link,
+job_id,title,company,company_id,location,salary,experience,publish_date,jd,job_link,
 boss_active_status,company_scale,company_stage,company_industry,skills,welfare,
 llm_match_reason
 ```
@@ -274,7 +282,8 @@ llm_match_reason
 默认输出：
 
 ```text
-job_id,title,location,salary,experience,company_scale,company_stage,company_industry
+关键词模式：job_id,title,location,salary,experience,company_scale,company_stage,company_industry
+公司模式：job_id,title,company,company_id,location,salary,experience
 ```
 
 ## 随机操作间隔
@@ -331,7 +340,7 @@ LLM 只用于理解自然语言岗位需求和岗位上下文，判断每个岗�
 ```bash
 export LLM_PROVIDER="siliconflow"
 export SILICONFLOW_API_KEY="your-siliconflow-api-key"
-export SILICONFLOW_MODEL="provider/model-id"
+export SILICONFLOW_MODEL="deepseek-ai/DeepSeek-V4-Flash"
 # 可选，默认 https://api.siliconflow.cn/v1
 export SILICONFLOW_BASE_URL="https://api.siliconflow.cn/v1"
 ```

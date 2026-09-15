@@ -220,7 +220,10 @@ def normalize_start_request(payload: dict) -> dict:
         raise WebRequestError("岗位需求不能超过 10000 个字符")
     llm_filter_enabled = _boolean_value(
         payload.get("llm_filter_enabled"),
-        default=True,
+        # Company-list mode should return every matching BOSS job by default;
+        # semantic filtering is opt-in there. Keyword mode keeps the existing
+        # LLM-first default for backwards compatibility.
+        default=(mode != "company"),
         label="是否启用 LLM 岗位相关性筛选",
     )
     if llm_filter_enabled and not job_requirements:
@@ -230,7 +233,7 @@ def normalize_start_request(payload: dict) -> dict:
 
     raw_fields = payload.get("output_fields")
     if raw_fields is None:
-        output_fields = list(batch.FINAL_CSV_COLUMNS)
+        output_fields = batch.default_output_fields(mode)
     elif not isinstance(raw_fields, list):
         raise WebRequestError("输出字段必须是数组")
     else:

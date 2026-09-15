@@ -1872,7 +1872,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
     stopped_by_mismatch_limit = False
     if job_matcher is None:
         job_matcher = lambda job: job_title_matches_keyword(keyword, job)
-    if consecutive_mismatch_limit <= 0:
+    if consecutive_mismatch_limit is not None and consecutive_mismatch_limit <= 0:
         raise ValueError("consecutive_mismatch_limit must be greater than 0")
     if not output_path:
         output_path = default_output_path("jobs")
@@ -2049,11 +2049,18 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
 
                 if not job_matcher(j):
                     consecutive_mismatches += 1
+                    mismatch_progress = (
+                        f" ({consecutive_mismatches}/{consecutive_mismatch_limit})"
+                        if consecutive_mismatch_limit is not None else ""
+                    )
                     print(
                         f"  ✗ {j.get('title', '')} | 未匹配当前关键词"
-                        f" ({consecutive_mismatches}/{consecutive_mismatch_limit})"
+                        f"{mismatch_progress}"
                     )
-                    if consecutive_mismatches >= consecutive_mismatch_limit:
+                    if (
+                        consecutive_mismatch_limit is not None
+                        and consecutive_mismatches >= consecutive_mismatch_limit
+                    ):
                         stopped_by_mismatch_limit = True
                         print(
                             f"  已连续 {consecutive_mismatch_limit} 个岗位未匹配当前关键词，"

@@ -35,6 +35,21 @@ class RequestValidationTests(unittest.TestCase):
             "company_scale", "company_stage", "company_industry",
         ])
 
+    def test_company_list_request_defaults_to_all_job_output_without_llm(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            table = pathlib.Path(temp_dir) / "companies.csv"
+            table.write_text("公司简称\n示例科技\n", encoding="utf-8")
+            options = module.normalize_start_request({
+                "mode": "company", "table_path": str(table),
+            })
+
+        self.assertFalse(options["llm_filter_enabled"])
+        self.assertEqual(options["job_requirements"], "")
+        self.assertEqual(options["output_fields"], [
+            "job_id", "title", "company", "company_id", "location", "salary",
+            "experience",
+        ])
+
     def test_missing_table_is_rejected(self):
         with self.assertRaisesRegex(module.WebRequestError, "表格文件不存在"):
             module.normalize_start_request({
@@ -309,7 +324,14 @@ class HtmlContentTests(unittest.TestCase):
         ):
             self.assertIn(f'value="{field_name}" checked', self.html)
         self.assertNotIn('value="company" checked', self.html)
+        self.assertNotIn('value="company_id" checked', self.html)
         self.assertIn('value="location" checked>公司地点', self.html)
+        self.assertIn("'company_id'", self.html)
+        self.assertIn("公司清单 → 全国在招岗位", self.html)
+        self.assertIn("使用 AI 客户清单", self.html)
+        self.assertIn('data-output-preset="mode"', self.html)
+        self.assertIn('data-output-preset="all"', self.html)
+        self.assertIn("公司模式默认输出 job_id", self.html)
 
     def test_switch_account_entry_and_confirmation_are_present(self):
         self.assertIn('id="switch-account-button"', self.html)

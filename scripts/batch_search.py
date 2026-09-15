@@ -50,12 +50,22 @@ COMBINATION_INTERVAL_SECONDS = 10.0
 COMMON_REQUIRED_COLUMNS = ("city", "salary", "experience")
 HEADER_ALIASES = {
     "keyword": {"搜索关键词", "关键词", "职位关键词", "keyword", "keywords", "query"},
-    "company": {"公司名称", "目标公司", "公司", "company", "employer", "brand"},
+    "company": {
+        "公司简称", "公司名称", "公司名", "目标公司", "公司", "工商全称",
+        "企业名称", "company", "companyname", "employer", "brand",
+    },
     "city": {"城市", "工作城市", "工作地点", "city", "location"},
     "salary": {"薪资待遇", "薪资", "薪资范围", "salary"},
     "experience": {"工作经验", "经验", "经验要求", "experience"},
     "job_type": {"求职类型", "工作性质", "职位性质", "jobtype", "job_type"},
 }
+
+# BOSS 检索通常对品牌简称的命中更准。源表同时含简称与工商全称时，
+# 按固定优先级选一列，而不把它们当作重复表头报错。
+COMPANY_HEADER_PRIORITY = (
+    "公司简称", "brand", "公司名称", "公司名", "目标公司", "公司",
+    "company", "companyname", "employer", "工商全称", "企业名称",
+)
 
 TAG_SPLIT_RE = re.compile(r"[\r\n,，;；|、]+")
 CELL_REF_RE = re.compile(r"^([A-Z]+)(\d+)$")
@@ -194,6 +204,15 @@ def canonical_header(value) -> str | None:
         if normalized in {normalize_label(alias).replace("_", "") for alias in aliases}:
             return canonical
     return None
+
+
+def _company_header_priority(value) -> int:
+    normalized = normalize_label(value).replace("_", "")
+    priorities = {
+        normalize_label(label).replace("_", ""): index
+        for index, label in enumerate(COMPANY_HEADER_PRIORITY)
+    }
+    return priorities.get(normalized, len(priorities))
 
 
 def _decode_text_file(path: Path) -> str:
@@ -364,14 +383,25 @@ def parse_rules(rows: list[list[str]], mode: str = MODE_KEYWORD) -> list[SearchR
         raise TableRuleError("表格为空")
     header_row_number, header = nonempty[0]
     columns: dict[str, int] = {}
+    company_column_priority: int | None = None
     for index, value in enumerate(header):
         canonical = canonical_header(value)
         if not canonical:
             continue
+        if canonical == "company" and mode == MODE_COMPANY:
+            priority = _company_header_priority(value)
+            if company_column_priority is None or priority < company_column_priority:
+                columns[canonical] = index
+                company_column_priority = priority
+            continue
         if canonical in columns:
             raise TableRuleError(f"表头重复: {value}")
         columns[canonical] = index
-    required_columns = (mode, *COMMON_REQUIRED_COLUMNS)
+    required_columns = (
+        (mode, *COMMON_REQUIRED_COLUMNS)
+        if mode == MODE_KEYWORD
+        else (MODE_COMPANY,)
+    )
     missing = [name for name in required_columns if name not in columns]
     if missing:
         display = {
@@ -398,12 +428,53 @@ def parse_rules(rows: list[list[str]], mode: str = MODE_KEYWORD) -> list[SearchR
                     seen.add(normalized)
         return values
 
-    search_terms = collect_column_tags(mode)
-    cities = collect_column_tags("city")
-    salary_labels = collect_column_tags("salary") or ["不限"]
-    experience_labels = collect_column_tags("experience") or ["不限"]
+    # A CRM/exported company list often contains a descriptive city column but
+    # is not a search-rules table.  Only activate company filters when the full
+    # city/salary/experience set is present; otherwise search each company once
+    # nationwide and avoid an accidental company × city Cartesian product.
+    use_filter_columns = (
+        mode == MODE_KEYWORD
+        or all(name in columns for name in COMMON_REQUIRED_COLUMNS)
+    )
+    if mode == MODE_COMPANY and not use_filter_columns:
+        # Company-list mode is row-oriented: commas and other punctuation are
+        # valid parts of a legal/brand name and must not create extra searches.
+        company_column = columns[MODE_COMPANY]
+        search_terms = []
+        seen_company_names = set()
+        for _, row in data_rows:
+            company_name = (
+                str(row[company_column]).strip()
+                if company_column < len(row) and row[company_column] is not None
+                else ""
+            )
+            normalized = normalize_label(company_name)
+            if company_name and normalized not in seen_company_names:
+                search_terms.append(company_name)
+                seen_company_names.add(normalized)
+    else:
+        search_terms = collect_column_tags(mode)
+    cities = (
+        collect_column_tags("city")
+        if use_filter_columns and "city" in columns
+        else ["全国"]
+    )
+    if mode == MODE_COMPANY and not cities:
+        cities = ["全国"]
+    salary_labels = (
+        collect_column_tags("salary")
+        if use_filter_columns and "salary" in columns
+        else []
+    ) or ["不限"]
+    experience_labels = (
+        collect_column_tags("experience")
+        if use_filter_columns and "experience" in columns
+        else []
+    ) or ["不限"]
     job_type_labels = (
-        collect_column_tags("job_type") if "job_type" in columns else []
+        collect_column_tags("job_type")
+        if use_filter_columns and "job_type" in columns
+        else []
     ) or ["不限"]
     if not search_terms:
         label = "搜索关键词" if mode == MODE_KEYWORD else "公司名称"
@@ -585,19 +656,26 @@ def execute_plan(
                 f"{condition['job_type']} ==="
             )
             intermediate = os.path.join(temp_dir, f"run_{index:04d}.json")
+            scrape_kwargs = {
+                "cdp_port": cdp_port,
+                "fmt": "json",
+                "allow_dom_fallback": allow_dom_fallback,
+                "request_interval": delay,
+                "job_matcher": lambda job: job_matches_combination(
+                    combination, job, company_match, keyword_match_threshold,
+                ),
+            }
+            if combination.mode == MODE_COMPANY:
+                # Company search must inspect every returned page because
+                # unrelated brands can be interleaved in search results.
+                scrape_kwargs["consecutive_mismatch_limit"] = None
             data = scrape_func(
                 combination.search_term,
                 combination.city_code,
                 pages,
                 combination.filters(),
                 intermediate,
-                cdp_port=cdp_port,
-                fmt="json",
-                allow_dom_fallback=allow_dom_fallback,
-                request_interval=delay,
-                job_matcher=lambda job: job_matches_combination(
-                    combination, job, company_match, keyword_match_threshold,
-                ),
+                **scrape_kwargs,
             )
             raw_jobs = data.get("jobs", []) if isinstance(data, dict) else []
             # scrape_list filters jobs incrementally so it can stop immediately
@@ -670,6 +748,7 @@ OUTPUT_FIELD_LABELS = {
     "job_id": "Job ID",
     "title": "职位名称",
     "company": "公司",
+    "company_id": "BOSS 公司 ID",
     "location": "公司地点",
     "salary": "薪资",
     "experience": "工作经验",
@@ -687,6 +766,9 @@ OUTPUT_FIELD_LABELS = {
 FINAL_CSV_COLUMNS = [
     "job_id", "title", "location", "salary", "experience",
     "company_scale", "company_stage", "company_industry",
+]
+COMPANY_RESULT_COLUMNS = [
+    "job_id", "title", "company", "company_id", "location", "salary", "experience",
 ]
 DEFAULT_RESULT_ROOT = Path(__file__).resolve().parents[1] / "result"
 CHECKPOINT_SCHEMA_VERSION = 2
@@ -781,9 +863,18 @@ def save_search_checkpoint(
     })
 
 
-def parse_output_fields(raw_fields: str | None) -> list[str]:
+def default_output_fields(mode: str = MODE_KEYWORD) -> list[str]:
+    if mode == MODE_COMPANY:
+        return list(COMPANY_RESULT_COLUMNS)
+    return list(FINAL_CSV_COLUMNS)
+
+
+def parse_output_fields(
+    raw_fields: str | None,
+    mode: str = MODE_KEYWORD,
+) -> list[str]:
     if raw_fields is None:
-        return list(FINAL_CSV_COLUMNS)
+        return default_output_fields(mode)
     fields = []
     for field_name in str(raw_fields).split(","):
         field_name = field_name.strip()
@@ -1031,6 +1122,7 @@ def _experience_from_record(record: dict) -> str:
 def export_record_from_job(job: dict) -> dict:
     record = dict(job)
     record["company"] = job.get("company") or job.get("boss_name") or ""
+    record["company_id"] = job.get("company_id") or job.get("encrypt_brand_id") or ""
     record["experience"] = _experience_from_record(job)
     record.setdefault("jd", "")
     return record
@@ -1116,8 +1208,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sheet", default=None, help="Excel 工作表名（默认第一个）")
     parser.add_argument("--pages", type=int, default=None,
                         help="每个搜索组合的页数上限（默认全部；手动设置正整数）")
-    parser.add_argument("--max-combinations", type=int, default=64,
-                        help="表格最大展开组合数（默认 64）")
+    parser.add_argument(
+        "--max-combinations", type=int, default=None,
+        help=(
+            "表格最大展开组合数"
+            "（默认：关键词模式 64，公司模式 5000）"
+        ),
+    )
     parser.add_argument("--interval", "--delay", dest="interval", type=float, default=3.0,
                         help="翻页和岗位详情的基准等待秒数（默认 3，每次在 ±20%% 内随机）；组合间以 10 秒为基准随机等待")
     parser.add_argument(
@@ -1147,8 +1244,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no-detail", dest="fetch_jd", action="store_false",
         help="不抓取 JD，直接输出职位列表（默认）",
     )
-    parser.add_argument("--output-fields", default=None,
-                        help=f"逗号分隔的输出字段（默认 {','.join(FINAL_CSV_COLUMNS)}）")
+    parser.add_argument(
+        "--output-fields", default=None,
+        help=(
+            "逗号分隔的输出字段（公司模式默认 "
+            f"{','.join(COMPANY_RESULT_COLUMNS)}）"
+        ),
+    )
     parser.add_argument("--published-from", default=None, metavar="YYYY-MM-DD",
                         help="岗位发布时间起始日期（包含当天）")
     parser.add_argument("--published-to", default=None, metavar="YYYY-MM-DD",
@@ -1209,7 +1311,7 @@ def main(argv=None) -> int:
         print("❌ --llm-batch-size 必须在 1-100 之间")
         return 2
     try:
-        output_fields = parse_output_fields(args.output_fields)
+        output_fields = parse_output_fields(args.output_fields, mode=args.mode)
         published_from, published_to = parse_publish_date_range(
             args.published_from, args.published_to,
         )
@@ -1218,11 +1320,16 @@ def main(argv=None) -> int:
             if args.fetch_publish_time is not None
             else bool(published_from or published_to)
         )
+        max_combinations = (
+            args.max_combinations
+            if args.max_combinations is not None
+            else (boss.MAX_API_REQUESTS if args.mode == MODE_COMPANY else 64)
+        )
         rules, combinations = build_plan(
             args.table,
             mode=args.mode,
             sheet_name=args.sheet,
-            max_combinations=args.max_combinations,
+            max_combinations=max_combinations,
         )
     except (TableRuleError, boss.CityResolutionError, ValueError) as exc:
         print(f"❌ 表格规则无效: {exc}")

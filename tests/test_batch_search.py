@@ -149,6 +149,41 @@ class TagParsingTests(unittest.TestCase):
         self.assertEqual(rule.mode, module.MODE_COMPANY)
         self.assertEqual(rule.search_terms, ("字节跳动", "腾讯"))
 
+    def test_company_list_only_needs_a_company_column(self):
+        rows = [
+            ["公司简称", "工商全称", "行业赛道", "城市"],
+            ["安徽合昕科技", "安徽合昕科技有限公司", "半导体/EDA", "合肥市/包河区"],
+            ["FutureBridge, Inc.", "FutureBridge Incorporated", "AI制药", "成都市/双流区"],
+        ]
+
+        rule = module.parse_rules(rows, mode=module.MODE_COMPANY)[0]
+
+        self.assertEqual(rule.search_terms, ("安徽合昕科技", "FutureBridge, Inc."))
+        self.assertEqual(rule.cities, ("全国",))
+        self.assertEqual(rule.salary_codes, ("",))
+        self.assertEqual(rule.experience_codes, ("",))
+        self.assertEqual(rule.job_type_codes, ("",))
+
+    def test_company_list_falls_back_to_legal_name_column(self):
+        rows = [
+            ["工商全称", "行业"],
+            ["安徽合昕科技有限公司", "半导体"],
+        ]
+
+        rule = module.parse_rules(rows, mode=module.MODE_COMPANY)[0]
+
+        self.assertEqual(rule.search_terms, ("安徽合昕科技有限公司",))
+
+    def test_company_filters_with_blank_city_default_to_nationwide(self):
+        rows = [
+            ["公司名称", "城市", "薪资待遇", "工作经验"],
+            ["字节跳动", "", "", ""],
+        ]
+
+        rule = module.parse_rules(rows, mode=module.MODE_COMPANY)[0]
+
+        self.assertEqual(rule.cities, ("全国",))
+
 
 class TableReadingTests(unittest.TestCase):
     def setUp(self):
@@ -374,6 +409,23 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual([job["job_id"] for job in jobs], ["keep"])
         self.assertEqual(runs[0]["jobs_found_raw"], 2)
         self.assertEqual(runs[0]["jobs_matched"], 1)
+
+    def test_company_mode_disables_consecutive_mismatch_early_stop(self):
+        combination = module.SearchCombination(
+            "字节跳动", "全国", "100010000", "", "", mode=module.MODE_COMPANY,
+        )
+        received = {}
+
+        def fake_scrape(*_args, **kwargs):
+            received.update(kwargs)
+            return {"jobs": []}
+
+        module.execute_plan(
+            [combination], pages=None, cdp_port=9222, allow_dom_fallback=False,
+            delay=0, scrape_func=fake_scrape,
+        )
+
+        self.assertIsNone(received["consecutive_mismatch_limit"])
 
     def test_company_name_matching_is_normalized_and_configurable(self):
         self.assertTrue(module.company_name_matches("字节跳动", "北京字节跳动科技有限公司"))
@@ -722,6 +774,26 @@ class ExecutionTests(unittest.TestCase):
                 "company_scale", "company_stage", "company_industry",
             ],
         )
+
+    def test_company_mode_has_requested_default_output_columns(self):
+        self.assertEqual(
+            module.parse_output_fields(None, mode=module.MODE_COMPANY),
+            [
+                "job_id", "title", "company", "company_id", "location", "salary",
+                "experience",
+            ],
+        )
+
+    def test_export_record_exposes_boss_brand_id_as_company_id(self):
+        record = module.export_record_from_job({
+            "job_id": "job-1",
+            "boss_name": "示例科技",
+            "encrypt_brand_id": "brand-1",
+            "experience": "3-5年",
+        })
+
+        self.assertEqual(record["company"], "示例科技")
+        self.assertEqual(record["company_id"], "brand-1")
 
     def test_relevant_jobs_are_aggregated_by_company(self):
         jobs = [

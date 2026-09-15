@@ -122,6 +122,7 @@
     input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(111,75,242,.12); }
     .hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
     .path-tools { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+    .field-tools { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 10px; }
     .text-button {
       border: 0;
       background: transparent;
@@ -287,7 +288,7 @@
             </label>
             <label class="mode-option">
               <input type="radio" name="mode" value="company">
-              <span><strong>按公司</strong><small>公司名称 + 核心约束</small></span>
+              <span><strong>按公司</strong><small>公司清单 → 全国在招岗位</small></span>
             </label>
           </div>
         </div>
@@ -300,12 +301,13 @@
             aria-controls="rule-requirements" data-disclosure-target="rule-requirements">检索规则要求</button>
           <div id="rule-requirements" class="info-panel" hidden>
             <p>搜索组合默认最多 64 个，避免规则笛卡尔积突然膨胀。</p>
-            <p><strong>计算方式：</strong>关键词数 × 城市数 × 薪资数 × 工作经验数。</p>
+            <p><strong>计算方式：</strong>关键词数 × 城市数 × 薪资数 × 工作经验数；公司清单模式默认每家公司全国搜索一次。</p>
             <p><strong>示例：</strong>3 个关键词 × 2 个城市 × 2 个薪资标签 × 2 个经验标签 = 24 个搜索组合。某个约束列为空时，该列按 1 种“不限”计算。</p>
           </div>
           <div class="path-tools">
             <button class="text-button" type="button" data-example="examples/keyword_rules.csv">使用关键词示例</button>
             <button class="text-button" type="button" data-example="examples/company_rules.csv">使用公司示例</button>
+            <button class="text-button" type="button" data-example="company_list/AI创新业务客户导出_2026910.csv">使用 AI 客户清单</button>
           </div>
         </div>
 
@@ -322,7 +324,7 @@
             <label for="job-requirements">岗位需求</label>
             <textarea id="job-requirements" maxlength="10000"
               placeholder="例如：我们寻找做机器人视觉、VLA 或多模态算法的团队，排除纯销售和测试岗。">我们寻找和AI相关或对AI算力有潜在需求的岗位</textarea>
-            <p class="hint">原检索流程保持不变：先执行本地标题模糊匹配和连续 5 个未匹配停搜，再按下方开关决定是否抓取 JD。检索完成后，将最终岗位表和需求发给 LLM 做语义相关性判断。后续公司聚合、工商信息抓取、去重和 CSV 输出均由代码完成。硅基流动需在启动 Web 前配置 LLM_PROVIDER、SILICONFLOW_API_KEY 和 SILICONFLOW_MODEL。</p>
+            <p class="hint">原检索流程保持不变：先执行本地标题模糊匹配和连续 5 个未匹配停搜，再按下方开关决定是否抓取 JD。检索完成后，将最终岗位表和需求发给 LLM 做语义相关性判断。后续公司聚合、工商信息抓取、去重和 CSV 输出均由代码完成。公司清单模式默认关闭 LLM，以保留该公司所有匹配岗位；如需启用请手动打开。硅基流动需在启动 Web 前配置 LLM_PROVIDER、SILICONFLOW_API_KEY 和 SILICONFLOW_MODEL。</p>
           </div>
           <div class="field">
             <label for="output-path">输出根目录（可选）</label>
@@ -389,11 +391,16 @@
             <p class="hint">仅公司检索模式生效；用于过滤搜索结果中的同名或无关公司</p>
           </div>
           <div class="field">
-            <div class="label">输出字段</div>
+            <div class="label" id="output-fields-label">岗位输出字段</div>
+            <div class="field-tools">
+              <button class="text-button" type="button" data-output-preset="mode">当前模式默认</button>
+              <button class="text-button" type="button" data-output-preset="all">全选可用字段</button>
+            </div>
             <div class="check-grid" id="output-fields">
               <label class="check-option"><input type="checkbox" value="job_id" checked>Job ID</label>
               <label class="check-option"><input type="checkbox" value="title" checked>职位名称</label>
               <label class="check-option"><input type="checkbox" value="company">公司</label>
+              <label class="check-option"><input type="checkbox" value="company_id">BOSS 公司 ID</label>
               <label class="check-option"><input type="checkbox" value="location" checked>公司地点</label>
               <label class="check-option"><input type="checkbox" value="salary" checked>薪资</label>
               <label class="check-option"><input type="checkbox" value="experience" checked>工作经验</label>
@@ -408,6 +415,7 @@
               <label class="check-option"><input type="checkbox" value="welfare">福利</label>
               <label class="check-option"><input type="checkbox" value="llm_match_reason">LLM 语义判断理由</label>
             </div>
+            <p class="hint" id="output-fields-hint">勾选的字段会按当前顺序写入 jobs.csv 和 jobs.json。</p>
           </div>
         </details>
 
@@ -471,6 +479,7 @@
     const maxDetails = document.querySelector('#max-details');
     const maxDetailsField = document.querySelector('#max-details-field');
     const outputFieldInputs = [...document.querySelectorAll('#output-fields input[type="checkbox"]')];
+    const outputFieldsHint = document.querySelector('#output-fields-hint');
     const jdOutputField = document.querySelector('[data-jd-field]');
     const companyMatch = document.querySelector('#company-match');
     const companyMatchField = document.querySelector('#company-match-field');
@@ -497,6 +506,30 @@
 
     function selectedMode() {
       return document.querySelector('input[name="mode"]:checked').value;
+    }
+
+    const defaultOutputFieldsByMode = {
+      keyword: [
+        'job_id', 'title', 'location', 'salary', 'experience',
+        'company_scale', 'company_stage', 'company_industry'
+      ],
+      company: [
+        'job_id', 'title', 'company', 'company_id', 'location', 'salary', 'experience'
+      ]
+    };
+
+    function applyModeOutputDefaults(mode) {
+      const selected = new Set(defaultOutputFieldsByMode[mode] || []);
+      outputFieldInputs.forEach(input => {
+        input.checked = selected.has(input.value);
+      });
+      updateOutputFieldsHint(mode);
+    }
+
+    function updateOutputFieldsHint(mode) {
+      outputFieldsHint.textContent = mode === 'company'
+        ? '公司模式默认输出 job_id、title、company、company_id、location、salary 和 experience；也可继续勾选发布时间、JD、职位链接等字段。'
+        : '勾选的字段会按当前顺序写入 jobs.csv 和 jobs.json。';
     }
 
     function setProgress(value) {
@@ -613,8 +646,12 @@
         companyMatchField.hidden = !isCompany;
         keywordMatchThresholdField.hidden = isCompany;
         tablePath.placeholder = isCompany
-          ? '/绝对路径/company_rules.csv'
+          ? '/绝对路径/company_list.xlsx'
           : '/绝对路径/keyword_rules.csv';
+        // Company mode is an exhaustive list lookup; LLM filtering is opt-in.
+        llmFilterEnabled.checked = !isCompany;
+        syncLlmControls();
+        applyModeOutputDefaults(isCompany ? 'company' : 'keyword');
       });
     });
 
@@ -624,6 +661,19 @@
     syncLlmControls();
     syncPublishTimeControls();
     syncJdControls();
+
+    document.querySelectorAll('[data-output-preset]').forEach(button => {
+      button.addEventListener('click', () => {
+        if (button.dataset.outputPreset === 'all') {
+          outputFieldInputs.forEach(input => {
+            input.checked = !input.disabled;
+          });
+          return;
+        }
+        applyModeOutputDefaults(selectedMode());
+        syncJdControls();
+      });
+    });
 
     document.querySelectorAll('[data-example]').forEach(button => {
       button.addEventListener('click', () => {
