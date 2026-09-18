@@ -941,7 +941,7 @@ def write_final_json(json_path: str, records: list[dict], fields: list[str] | No
 
 
 def aggregate_relevant_companies(records: Iterable[dict]) -> list[dict]:
-    """Aggregate LLM-matched jobs into unique BOSS companies."""
+    """Aggregate final jobs into unique BOSS companies."""
     companies = {}
     for record in records:
         source_name = str(record.get("company") or record.get("boss_name") or "").strip()
@@ -1579,23 +1579,27 @@ def main(argv=None) -> int:
             return 1
         print(f"LLM 语义判断完成: {candidate_record_count} 条候选 -> {len(records)} 条相关岗位")
 
-        companies = aggregate_relevant_companies(records)
-        print(f"相关岗位聚合为 {len(companies)} 家公司")
-        try:
-            company_registration_rows = boss.scrape_company_registrations(
-                companies,
-                cdp_port=args.cdp_port,
-                request_interval=args.interval,
-            )
-        except (RuntimeError, boss.CDPConnectionError, OSError) as exc:
-            print(f"❌ 公司工商信息抓取中止，检查点已保留: {exc}")
-            return 1
-        company_registrations = deduplicate_company_registrations(company_registration_rows)
-        print(f"法定主体去重后共 {len(company_registrations)} 家")
-        write_company_csv(companies_csv_path, company_registrations)
-        write_job_company_mapping_csv(
-            job_company_mapping_csv_path, records, company_registration_rows,
+    # The job-company mapping is useful independently of semantic filtering:
+    # it must be emitted for every completed search, including plain keyword or
+    # company searches with LLM disabled.
+    companies = aggregate_relevant_companies(records)
+    print(f"相关岗位聚合为 {len(companies)} 家公司")
+    try:
+        company_registration_rows = boss.scrape_company_registrations(
+            companies,
+            cdp_port=args.cdp_port,
+            request_interval=args.interval,
         )
+    except (RuntimeError, boss.CDPConnectionError, OSError) as exc:
+        print(f"❌ 公司工商信息抓取中止，检查点已保留: {exc}")
+        return 1
+    company_registrations = deduplicate_company_registrations(company_registration_rows)
+    print(f"法定主体去重后共 {len(company_registrations)} 家")
+    if job_requirements:
+        write_company_csv(companies_csv_path, company_registrations)
+    write_job_company_mapping_csv(
+        job_company_mapping_csv_path, records, company_registration_rows,
+    )
 
     payload["candidate_total"] = candidate_record_count
     payload["total"] = len(records)
@@ -1609,9 +1613,7 @@ def main(argv=None) -> int:
         "relevant_jobs": len(records),
     }
     payload["companies"] = company_registrations
-    payload["job_company_mapping_csv"] = (
-        job_company_mapping_csv_path if job_requirements else ""
-    )
+    payload["job_company_mapping_csv"] = job_company_mapping_csv_path
     boss._atomic_write_json(metadata_path, payload)
     write_final_json(json_path, records, output_fields)
     write_final_csv(csv_path, records, output_fields)

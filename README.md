@@ -425,7 +425,7 @@ result/
 - `jobs.json`：与 CSV 使用相同的字段投影。
 - `metadata.json`：保留检索计划、组合运行统计、选项、日期筛选统计、LLM 信息和公司数据。
 - `companies.csv`：只包含 `company_full_name` 和 `unified_social_credit_code` 两列。
-- `job_company_mapping.csv`：启用 LLM 岗位判断时生成，每个最终岗位一行，包含
+- `job_company_mapping.csv`：每次完成的检索任务都会生成，每个最终岗位一行，包含
   `job_id`、`boss_company_id`、`company_full_name` 和 `unified_social_credit_code`。
   其中 `boss_company_id` 来自 BOSS 接口返回的 `encrypt_brand_id`；未抓到工商信息时仍保留岗位和公司 ID，工商字段为空。
 

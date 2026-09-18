@@ -431,10 +431,7 @@ class ScrapeTaskManager:
                     str(result_dir / "companies.csv")
                     if options["job_requirements"] else ""
                 ),
-                job_company_mapping_csv_path=(
-                    str(result_dir / "job_company_mapping.csv")
-                    if options["job_requirements"] else ""
-                ),
+                job_company_mapping_csv_path=str(result_dir / "job_company_mapping.csv"),
                 fetch_jd=options["fetch_jd"],
             )
             self._tasks[task.job_id] = task
