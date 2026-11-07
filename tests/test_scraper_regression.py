@@ -7,10 +7,12 @@ import pathlib
 import platform
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from datetime import datetime
 from contextlib import redirect_stdout
 from unittest import mock
@@ -840,6 +842,50 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertNotIn("jd = body.substring", module.EXTRACT_DETAIL_JS)
         self.assertIn("page_text", module.EXTRACT_DETAIL_JS)
         self.assertIn("text.indexOf('职位描述')", module.EXTRACT_DETAIL_JS)
+
+    def test_detail_extractor_keeps_regex_escapes_for_browser(self):
+        module = load_module()
+
+        # \n 必须作为转义序列交给浏览器；变成真实换行会让 JS 正则字面量跨行而报错。
+        self.assertIn(r"[^|\n，,。]", module.EXTRACT_DETAIL_JS)
+        self.assertIn(r"replace(/\s+/g, ' ')", module.EXTRACT_DETAIL_JS)
+
+    def test_scraper_source_has_no_invalid_string_escapes(self):
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        with warnings.catch_warnings():
+            # Python 3.12+ 报 SyntaxWarning，3.9–3.11 报 DeprecationWarning。
+            warnings.simplefilter("error", SyntaxWarning)
+            warnings.simplefilter("error", DeprecationWarning)
+            compile(source, str(SCRIPT_PATH), "exec")
+
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 校验注入脚本语法")
+    def test_injected_page_scripts_are_valid_javascript(self):
+        module = load_module()
+        names = [
+            "EXTRACT_LIST_JS",
+            "EXTRACT_DETAIL_JS",
+            "EXTRACT_PUBLISH_TIME_JS",
+            "EXTRACT_COMPANY_REGISTRATION_JS",
+        ]
+        checker = (
+            "const vm = require('vm');"
+            "let src = '';"
+            "process.stdin.on('data', c => src += c);"
+            "process.stdin.on('end', () => {"
+            "  try { new vm.Script(src); }"
+            "  catch (e) { console.error(e.message); process.exit(1); }"
+            "});"
+        )
+        for name in names:
+            with self.subTest(script=name):
+                result = subprocess.run(
+                    ["node", "-e", checker],
+                    input=getattr(module, name),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_extract_job_description_removes_header_and_recruiter_footer(self):
         module = load_module()

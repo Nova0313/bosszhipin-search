@@ -866,7 +866,9 @@ class DetailLoginRequiredError(DetailExtractionError):
     """The detail page is truncated because the BOSS session is not logged in."""
 
 
-EXTRACT_DETAIL_JS = """
+# 必须是 raw string：JS 正则里的 \s、\d、\n 需要原样交给浏览器。
+# 普通字符串会把 \n 变成真实换行，导致正则字面量跨行、整段脚本 SyntaxError。
+EXTRACT_DETAIL_JS = r"""
 (function(){
     var pageText = document.body ? document.body.innerText : '';
     var tags = [];
